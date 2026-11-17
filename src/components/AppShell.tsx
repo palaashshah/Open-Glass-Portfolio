@@ -1,9 +1,9 @@
 'use client'
 import { useEffect, useMemo, useState } from 'react'
 import {
-  ApiError, localTime, toPercent,
+  ApiError, localTime, localDate, toPercent,
   getInvestors, getInteractions, getAllInteractions,
-  listPortfolios, getValuation,
+  listPortfolios, getValuation, deleteInvestor,
   type InvestorResponse, type PortfolioResponse, type ValuationResponse,
 } from '@/lib/api'
 import { ETFS } from '@/lib/etfs'
@@ -97,12 +97,16 @@ export default function AppShell() {
   const [selectedInvestorId, setSelectedInvestorId] = useState<string | null>(null)
   const [search, setSearch] = useState('')
 
-  useEffect(() => {
+  function refreshInvestors() {
+    setInvestorsLoading(true)
+    setInvestorsError('')
     getInvestors()
       .then(data => setInvestors(data))
       .catch(e => setInvestorsError(e instanceof ApiError ? e.message : 'Could not load investors.'))
       .finally(() => setInvestorsLoading(false))
-  }, [])
+  }
+
+  useEffect(() => { refreshInvestors() }, [])
 
   const selectedInvestor = useMemo(
     () => investors.find(i => i.id === selectedInvestorId) ?? null,
@@ -192,6 +196,11 @@ export default function AppShell() {
             investor={selectedInvestor}
             onEditReview={() => setActiveView('review')}
             onOpenProposal={() => setActiveView('proposal')}
+            onDeleted={() => {
+              setSelectedInvestorId(null)
+              setActiveView('investors')
+              refreshInvestors()
+            }}
           />
         )}
         {activeView === 'investor-detail' && !selectedInvestor && (
@@ -449,15 +458,35 @@ function InvestorDetail({
   investor,
   onEditReview,
   onOpenProposal,
+  onDeleted,
 }: {
   investor: Investor
   onEditReview: () => void
   onOpenProposal: () => void
+  onDeleted: () => void
 }) {
   const [interactions, setInteractions] = useState<Interaction[]>([])
   const [latestPortfolio, setLatestPortfolio] = useState<PortfolioResponse | null>(null)
   const [valuation, setValuation] = useState<ValuationResponse | null>(null)
   const [valError, setValError] = useState('')
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+
+  async function handleDelete() {
+    const typed = window.prompt(
+      `Delete investor "${investor.name}"?\n\nThis also removes their portfolios, assessments, interactions and audit history. Type DELETE to confirm.`
+    )
+    if (typed !== 'DELETE') return
+    setDeleting(true)
+    setDeleteError('')
+    try {
+      await deleteInvestor(investor.id)
+      onDeleted()
+    } catch (e) {
+      setDeleteError(e instanceof ApiError ? e.message : 'Could not delete investor.')
+      setDeleting(false)
+    }
+  }
 
   useEffect(() => {
     getInteractions(investor.id).then(setInteractions).catch(() => setInteractions([]))
@@ -516,8 +545,31 @@ function InvestorDetail({
             padding: '8px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none',
             background: '#FFFFE3', color: '#4A4A4A', cursor: 'pointer',
           }}>Open proposal</button>
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            title="Delete this investor and all related records"
+            style={{
+              padding: '8px 14px', fontSize: 12, borderRadius: 6,
+              border: '1px solid rgba(240,149,149,0.5)',
+              background: 'transparent', color: '#F09595',
+              cursor: deleting ? 'not-allowed' : 'pointer',
+              opacity: deleting ? 0.6 : 1,
+            }}
+          >{deleting ? 'Deleting…' : 'Delete investor'}</button>
         </div>
       </div>
+
+      {deleteError && (
+        <div style={{
+          background: 'rgba(240,149,149,0.08)',
+          border: '0.5px solid rgba(240,149,149,0.35)',
+          borderRadius: 10, padding: '10px 14px', marginBottom: '1rem',
+          fontSize: 13, color: '#F09595',
+        }}>
+          Delete failed: {deleteError}
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: '1.5rem' }}>
         <StatCard label="AUM" value={investor.total_aum ? '₹' + investor.total_aum.toLocaleString('en-IN') : '—'} />
@@ -534,16 +586,21 @@ function InvestorDetail({
         <StatCard label="Horizon" value={investor.investment_horizon ?? '—'} />
       </div>
 
-      {valuation && (
+      {(latestPortfolio || valuation) && (
         <p style={{ fontSize: 11, color: '#6D8196', marginBottom: '1rem' }}>
-          Data as of {valuation.as_of_date}
-          {valuation.hypothetical && ' · hypothetical (paper valuation; no trades placed)'}
+          {latestPortfolio && <>Latest portfolio snapshot: {localDate(latestPortfolio.created_at)} ({latestPortfolio.status})</>}
+          {valuation && latestPortfolio && ' · '}
+          {valuation && <>Valuation as of {valuation.as_of_date}</>}
+          {valuation?.hypothetical && ' · hypothetical (paper valuation; no trades placed)'}
         </p>
       )}
       {valError && <p style={{ fontSize: 12, color: '#F09595', marginBottom: '1rem' }}>{valError}</p>}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: '1.5rem' }}>
-        <AUMSplitChart data={allocationData ?? undefined} />
+        <AUMSplitChart
+          data={allocationData ?? undefined}
+          asOf={latestPortfolio ? localDate(latestPortfolio.created_at) : undefined}
+        />
         <HoldingDriftPanel valuation={valuation} />
       </div>
 
