@@ -146,19 +146,19 @@ export function RationalePanel({ investorId, investorName }: RationaleProps) {
   }, [portfolio])
 
   if (!investorId) return <Empty>Select an investor to see their rationale.</Empty>
-  if (state === 'loading') return <Empty>Loading…</Empty>
+  if (state === 'loading' || state === 'idle') return <Empty>Loading…</Empty>
   if (state === 'error') return <ErrorView title="Rationale" error={error} />
-  if (state === 'none') return <Empty>No portfolio for {investorName ?? 'this investor'} yet.</Empty>
+  if (state === 'none' || !portfolio) return <Empty>No portfolio for {investorName ?? 'this investor'} yet.</Empty>
 
   return (
     <div style={{ padding: '2rem', maxWidth: 900 }}>
       <div style={rowBetween}>
         <h1 style={h1}>Rationale</h1>
-        <StatusChip status={portfolio!.status} />
+        <StatusChip status={portfolio.status} />
       </div>
       <p style={muted}>
-        Explanation for {investorName ?? 'the investor'} · portfolio {portfolio!.id.slice(0, 8)}… ·
-        snapshot {localDate(portfolio!.created_at)}
+        Explanation for {investorName ?? 'the investor'} · portfolio {portfolio.id.slice(0, 8)}… ·
+        snapshot {localDate(portfolio.created_at)}
       </p>
 
       {rLoading && <Empty>Loading rationale…</Empty>}
@@ -256,7 +256,7 @@ export function ProposalReport({ investorId, investorName }: ProposalReportProps
   }
 
   if (!investorId) return <Empty>Select an investor to prepare a proposal.</Empty>
-  if (state === 'loading') return <Empty>Loading…</Empty>
+  if (state === 'loading' || state === 'idle') return <Empty>Loading…</Empty>
   if (state === 'error') return <ErrorView title="Proposal" error={error} />
   if (state === 'none' || !portfolio) return <Empty>No portfolio for {investorName ?? 'this investor'} yet.</Empty>
 
@@ -537,7 +537,7 @@ export function InvestorPortalView({ investor }: { investor?: Investor | null })
   }, [portfolio])
 
   if (!investor) return <Empty>No investor selected.</Empty>
-  if (state === 'loading') return <Empty>Loading portfolio…</Empty>
+  if (state === 'loading' || state === 'idle') return <Empty>Loading portfolio…</Empty>
   if (state === 'error') return <ErrorView title="Investor portal" error={error} />
   if (state === 'none' || !portfolio) {
     return <Empty>{investor.name} has not accepted a portfolio yet.</Empty>
@@ -675,7 +675,7 @@ export function ClientSignOffPanel({ investorId, investorName, onDecided }: Clie
   }
 
   if (!investorId) return <Empty>Select an investor.</Empty>
-  if (state === 'loading') return <Empty>Loading…</Empty>
+  if (state === 'loading' || state === 'idle') return <Empty>Loading…</Empty>
   if (state === 'error') return <ErrorView title="Client sign-off" error={error} />
   if (state === 'none' || !portfolio) {
     return <Empty>{investorName ?? 'This investor'} has no approved portfolio awaiting client sign-off.</Empty>
