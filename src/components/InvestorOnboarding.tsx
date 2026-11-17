@@ -50,6 +50,59 @@ function StepHeader({ title, subtitle }: { title: string; subtitle: string }) {
     )
 }
 
+// Inline error message shown under a field. Pass empty string to render nothing.
+function FieldError({ message }: { message: string }) {
+    if (!message) return null
+    return (
+        <p style={{
+            marginTop: 6, fontSize: 12, color: "#F09595",
+            fontFamily: "var(--font-body)",
+        }}>{message}</p>
+    )
+}
+
+// ── validators ───────────────────────────────────────────────────────────────
+// Each returns an error string (empty = valid). They're pure functions so the
+// Next button can derive disabled state from the same checks the UI shows.
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const MIN_INVESTMENT = 10_000
+
+function validateName(v: string): string {
+    const t = v.trim()
+    if (!t) return "Please enter your name."
+    if (t.length < 2) return "Name is too short."
+    return ""
+}
+function validateEmail(v: string): string {
+    const t = v.trim()
+    if (!t) return "Email is required."
+    if (!EMAIL_RE.test(t)) return "That doesn't look like a valid email."
+    return ""
+}
+function validateMobile(v: string): string {
+    if (!v) return "Mobile number is required."
+    if (v.length !== 10) return "Enter a 10-digit mobile number."
+    if (!/^[6-9]\d{9}$/.test(v)) return "Indian mobile numbers start with 6, 7, 8 or 9."
+    return ""
+}
+function validateInvestment(v: string): string {
+    if (!v) return "Enter an initial investment."
+    const n = Number(v)
+    if (!Number.isFinite(n)) return "Please enter a number."
+    if (n <= 0) return "Investment must be greater than zero."
+    if (n < MIN_INVESTMENT) return `Minimum initial investment is ₹${MIN_INVESTMENT.toLocaleString("en-IN")}.`
+    return ""
+}
+function validateAge(v: string): string {
+    if (!v) return "Age is required."
+    const n = Number(v)
+    if (!Number.isInteger(n)) return "Age must be a whole number."
+    if (n < 18) return "Investor must be at least 18."
+    if (n > 100) return "Please enter a realistic age."
+    return ""
+}
+
 // ── MAIN COMPONENT ────────────────────────────────────────────────────────────
 
 export default function InvestorOnboarding() {
@@ -134,81 +187,131 @@ export default function InvestorOnboarding() {
     )
 
     // ── STEP 1 — Basic Info ──────────────────────────────────────────────────
-    if (step === 1) return screen(
-        <>
-            <ProgressBar step={1} total={5} />
-            <StepHeader title="Let&apos;s get started" subtitle="Tell us a bit about yourself" />
+    if (step === 1) {
+        const nameErr = validateName(name)
+        const emailErr = validateEmail(email)
+        const mobileErr = validateMobile(mobile)
+        const investErr = validateInvestment(initialInvestment)
+        const canNext = !nameErr && !emailErr && !mobileErr && !investErr
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-                <div>
-                    <label style={labelStyle}>Full Name</label>
-                    <input value={name} onChange={e => setName(e.target.value)}
-                        placeholder="e.g. Raj Mehta" style={inputStyle} />
-                </div>
+        return screen(
+            <>
+                <ProgressBar step={1} total={5} />
+                <StepHeader title="Let&apos;s get started" subtitle="Tell us a bit about yourself" />
 
-                {/* two inputs side by side */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
                     <div>
-                        <label style={labelStyle}>Email</label>
-                        <input value={email} onChange={e => setEmail(e.target.value)}
-                            placeholder="raj@example.com" style={inputStyle} />
+                        <label style={labelStyle}>Full Name</label>
+                        <input
+                            value={name}
+                            onChange={e => setName(e.target.value)}
+                            placeholder="e.g. Raj Mehta"
+                            maxLength={80}
+                            style={inputStyle}
+                        />
+                        {name && <FieldError message={nameErr} />}
                     </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                        <div>
+                            <label style={labelStyle}>Email</label>
+                            <input
+                                type="email"
+                                value={email}
+                                onChange={e => setEmail(e.target.value)}
+                                placeholder="raj@example.com"
+                                maxLength={120}
+                                style={inputStyle}
+                            />
+                            {email && <FieldError message={emailErr} />}
+                        </div>
+                        <div>
+                            <label style={labelStyle}>Mobile</label>
+                            <input
+                                type="tel"
+                                inputMode="numeric"
+                                value={mobile}
+                                onChange={e => setMobile(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                                placeholder="10-digit number"
+                                maxLength={10}
+                                style={inputStyle}
+                            />
+                            {mobile && <FieldError message={mobileErr} />}
+                        </div>
+                    </div>
+
                     <div>
-                        <label style={labelStyle}>Mobile</label>
-                        <input value={mobile} onChange={e => setMobile(e.target.value)}
-                            placeholder="+91 98765 43210" style={inputStyle} />
+                        <label style={labelStyle}>Initial Investment (₹)</label>
+                        <input
+                            type="number"
+                            inputMode="numeric"
+                            min={MIN_INVESTMENT}
+                            step={1000}
+                            value={initialInvestment}
+                            onChange={e => setInitialInvestment(e.target.value)}
+                            placeholder={`min ₹${MIN_INVESTMENT.toLocaleString('en-IN')}`}
+                            style={inputStyle}
+                        />
+                        {initialInvestment && <FieldError message={investErr} />}
                     </div>
                 </div>
 
-                <div>
-                    <label style={labelStyle}>Initial Investment (₹)</label>
-                    <input value={initialInvestment} onChange={e => setInitialInvestment(e.target.value)}
-                        placeholder="e.g. 500000" style={inputStyle} />
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "40px" }}>
+                    <button onClick={() => setStep(2)} disabled={!canNext} style={buttonStyle(!canNext)}>
+                        Next →
+                    </button>
                 </div>
-            </div>
-
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "40px" }}>
-                {/* disabled until name and email are filled */}
-                <button onClick={() => setStep(2)} disabled={!name || !email} style={buttonStyle(!name || !email)}>
-                    Next →
-                </button>
-            </div>
-        </>
-    )
+            </>
+        )
+    }
 
     // ── STEP 2 — Demographics ────────────────────────────────────────────────
-    if (step === 2) return screen(
-        <>
-            <ProgressBar step={2} total={5} />
-            <StepHeader title="Your background" subtitle="This helps us understand your financial situation" />
+    if (step === 2) {
+        const ageErr = validateAge(age)
+        const canNext = !ageErr && !!incomeStability
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-                <div>
-                    <label style={labelStyle}>Age</label>
-                    <input value={age} onChange={e => setAge(e.target.value)}
-                        placeholder="e.g. 32" style={inputStyle} />
-                </div>
-                <div>
-                    <label style={labelStyle}>Income Stability</label>
-                    {/* select dropdown — controls the possible values */}
-                    <select value={incomeStability} onChange={e => setIncomeStability(e.target.value)}
-                        style={{ ...inputStyle, appearance: "none" as const }}>
-                        <option value="">Select one...</option>
-                        <option value="highly_stable">Highly Stable</option>
-                        <option value="moderately_stable">Moderately Stable</option>
-                        <option value="unstable">Unstable</option>
-                    </select>
-                </div>
-            </div>
+        return screen(
+            <>
+                <ProgressBar step={2} total={5} />
+                <StepHeader title="Your background" subtitle="This helps us understand your financial situation" />
 
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: "40px" }}>
-                <button onClick={() => setStep(1)} style={backButtonStyle}>← Back</button>
-                <button onClick={() => setStep(3)} disabled={!age || !incomeStability} style={buttonStyle(!age || !incomeStability)}>
-                    Next →
-                </button>
-            </div>
-        </>
-    )
+                <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                    <div>
+                        <label style={labelStyle}>Age</label>
+                        <input
+                            type="number"
+                            inputMode="numeric"
+                            min={18}
+                            max={100}
+                            step={1}
+                            value={age}
+                            onChange={e => setAge(e.target.value)}
+                            placeholder="18 – 100"
+                            style={inputStyle}
+                        />
+                        {age && <FieldError message={ageErr} />}
+                    </div>
+                    <div>
+                        <label style={labelStyle}>Income Stability</label>
+                        <select value={incomeStability} onChange={e => setIncomeStability(e.target.value)}
+                            style={{ ...inputStyle, appearance: "none" as const }}>
+                            <option value="">Select one...</option>
+                            <option value="highly_stable">Highly Stable</option>
+                            <option value="moderately_stable">Moderately Stable</option>
+                            <option value="unstable">Unstable</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: "40px" }}>
+                    <button onClick={() => setStep(1)} style={backButtonStyle}>← Back</button>
+                    <button onClick={() => setStep(3)} disabled={!canNext} style={buttonStyle(!canNext)}>
+                        Next →
+                    </button>
+                </div>
+            </>
+        )
+    }
 
     // ── STEP 3 — Sector Exclusions ───────────────────────────────────────────
     if (step === 3) return screen(
