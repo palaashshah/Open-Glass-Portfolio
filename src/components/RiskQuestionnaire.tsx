@@ -105,7 +105,7 @@ export default function RiskQuestionnaire({ onComplete }: Props) {
                     fontWeight: 700, letterSpacing: "0.15em",
                     textTransform: "uppercase", color: "rgba(255,255,255,0.4)",
                     marginBottom: "32px"
-                }}>Risk Assessment · v{meta.version}</p>
+                }}>Questionnaire</p>
 
                 {meta.questions.map((q, index) => {
                     const isDone = index < currentIndex
@@ -252,7 +252,7 @@ function ResultsPanel({ preview, onContinue }: { preview: RiskScoreResponse; onC
                 <p style={{
                     fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--slate)',
                     letterSpacing: '0.12em', textTransform: 'uppercase', marginBottom: 12,
-                }}>Scored by the server · questionnaire {preview.questionnaire_version}</p>
+                }}>Scored by the server</p>
                 <h2 style={{
                     fontFamily: 'var(--font-heading)', fontSize: 28, color: 'var(--charcoal)',
                     fontWeight: 700, marginBottom: 6,
