@@ -2,8 +2,8 @@
 
 type Interaction = {
   id: string
-  interaction_type: string
-  notes: string
+  interaction_type?: string
+  notes?: string
   timestamp?: string
   manager_id?: string
 }
@@ -55,7 +55,7 @@ export default function InteractionList({ interactions }: InteractionListProps) 
               {/* type dot */}
               <div style={{
                 width: '8px', height: '8px', borderRadius: '50%',
-                background: getTypeColor(interaction.interaction_type),
+                background: getTypeColor(interaction.interaction_type ?? ''),
                 marginTop: '5px', flexShrink: 0,
               }} />
 

@@ -1,112 +1,464 @@
+// Single source of truth for backend calls. One function per endpoint.
+// Typed functions return the raw backend shape — weights/returns as
+// decimals (0–1) and timestamps as UTC ISO strings. The UI should call
+// toPercent / localTime at the display edge, never fabricate values of
+// its own.
+//
+// Error handling: every function throws ApiError on a non-2xx response
+// (detail text when the backend provides one). Back-compat shims at the
+// bottom preserve the "silently return empty / null" behavior of a few
+// old call sites until later steps migrate them.
+
 const API_BASE = "http://localhost:8000"
 
-export async function createInvestor(data: {
-    name: string        // required — must be provided
-    total_aum?: number  // "?" optional — can be skipped
-    investment_horizon?: string
-    risk_score?: string
+// ---------- error type + request helper ----------
+
+export class ApiError extends Error {
+    readonly status: number
+    readonly detail: unknown
+    constructor(status: number, detail: unknown, message: string) {
+        super(message)
+        this.name = 'ApiError'
+        this.status = status
+        this.detail = detail
+    }
+}
+
+type RequestOptions = Omit<RequestInit, 'body'> & { body?: unknown }
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const { body, headers, ...rest } = options
+    const res = await fetch(`${API_BASE}${path}`, {
+        ...rest,
+        headers: {
+            ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+            ...headers,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const text = await res.text()
+    let payload: unknown = undefined
+    if (text) {
+        try { payload = JSON.parse(text) } catch { payload = text }
+    }
+    if (!res.ok) {
+        const detail = (payload as { detail?: unknown } | undefined)?.detail ?? payload
+        const message = typeof detail === 'string' ? detail : `HTTP ${res.status}`
+        throw new ApiError(res.status, detail, message)
+    }
+    return payload as T
+}
+
+// ---------- display helpers (use at the UI edge, never in business logic) ----------
+
+export function toPercent(fraction: number, digits = 2): number {
+    const m = Math.pow(10, digits)
+    return Math.round(fraction * 100 * m) / m
+}
+
+export function fromPercent(percent: number): number {
+    return percent / 100
+}
+
+export function localTime(utcIso: string | null | undefined): string {
+    if (!utcIso) return ''
+    // Backend timestamps come back as naive ISO strings (e.g. "2026-11-17T10:11:53.028262").
+    // Treat them as UTC when no zone is present, then format in the user's locale.
+    const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(utcIso)
+    const d = new Date(hasZone ? utcIso : utcIso + 'Z')
+    if (isNaN(d.getTime())) return utcIso
+    return d.toLocaleString()
+}
+
+export function localDate(isoDate: string | null | undefined): string {
+    if (!isoDate) return ''
+    const d = new Date(isoDate)
+    if (isNaN(d.getTime())) return isoDate
+    return d.toLocaleDateString()
+}
+
+// ---------- backend schema types ----------
+
+export type Demographics = Record<string, unknown>
+export type PreferencesConstraints = Record<string, unknown>
+
+export interface InvestorCreate {
+    name: string
     assigned_manager_id: string
-    demographics?: object
-    preferences_constraints?: object
-}) {
-    const response = await fetch(`${API_BASE}/investors/`, // this is a template literal. Instead of "http://localhost:8000" + "/investors/"
-                                                           //  fetch sends the HTTP request. await means "wait for the response before continuing".
-        {
-            method: 'POST', // tells fetch which HTTP method to use, default is "GET"
-            headers: {
-                "Content-Type": "application/json" // tells the API you're sending JSON
-            },
-            body: JSON.stringify(data) // converts your JavaScript object into a JSON string. The API can't receive a JavaScript object directly
-        }   
-    );     
-    return response.json(); //  converts the response text back into a JavaScript object so you can use it in your code.
+    demographics?: Demographics | null
+    total_aum?: number | null
+    investment_horizon?: string | null
+    risk_score?: string | null
+    preferences_constraints?: PreferencesConstraints | null
+    risk_answers?: Record<string, number> | null
 }
 
-export async function getInvestors() {
-    const response = await fetch(`${API_BASE}/investors/`)
-    return response.json();
-}
-export async function getInvestor(investorId: string) {
-    const response = await fetch(`${API_BASE}/investors/${investorId}`)
-    return response.json();
-}
-
-export async function getInteractions(investorId: string) {
-    try {
-        const response = await fetch(`${API_BASE}/interactions/?investor_id=${investorId}`)
-                                                            // ↑
-                                                            // /interactions/?investor_id=abc123  ← investor_id is a QUESTION to the path
-                                                            // /interactions/abc123       ← investor_id IS the path
-                                                            // If you use a Path Parameter (/interactions/123), you are saying that "Interaction 123" is a unique destination, like a specific house.
-                                                            // If you use a Query Parameter (/interactions?investor_id=123), you are saying "Show me the general interactions list, but filter it so I only see things belonging to this investor."                          
-        const data = await response.json()
-        // backend might return an array directly, or wrapped — handle both
-        return Array.isArray(data) ? data : []
-    } catch {
-        return []  // if fetch fails entirely, return empty array instead of crashing
-    }
+export interface InvestorUpdate {
+    name?: string | null
+    demographics?: Demographics | null
+    total_aum?: number | null
+    investment_horizon?: string | null
+    risk_score?: string | null
+    preferences_constraints?: PreferencesConstraints | null
+    assigned_manager_id?: string | null
 }
 
-export async function createInteraction(data: {
+export interface InvestorResponse {
+    id: string
+    name: string
+    assigned_manager_id: string
+    demographics?: Demographics | null
+    total_aum?: number | null
+    investment_horizon?: string | null
+    risk_score?: string | null
+    preferences_constraints?: PreferencesConstraints | null
+}
+
+export interface InteractionCreate {
     investor_id: string
-    interaction_type: string
-    notes: string
     manager_id: string
-    timestamp?: string
-}){
-     const response = await fetch(`${API_BASE}/interactions/`,
-        {
-            method: 'POST', 
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(data)
-        }   
-    );
-    return response.json();
+    interaction_type?: string | null
+    notes?: string | null
+    timestamp?: string | null
 }
 
-export async function updateInvestor(investorId: string, data: {
-  name?: string
-  total_aum?: number
-  investment_horizon?: string
-  risk_score?: string
-  demographics?: object
-  preferences_constraints?: object
-}) {
-  const response = await fetch(`${API_BASE}/investors/${investorId}`, // ← ID in the URL
-    {
-      method: 'PUT', // ← PUT means "replace this specific resource with new data"
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(data) // only send the fields you want to change
-    }
-  )
-  return response.json()
+export interface InteractionResponse {
+    id: string
+    investor_id: string
+    manager_id: string
+    interaction_type?: string | null
+    notes?: string | null
+    timestamp?: string | null
 }
 
-export async function getAllInteractions(){
-    const response = await fetch(`${API_BASE}/interactions/`)
-    return response.json();
+export interface RiskAnswers {
+    answers: Record<string, number>
 }
 
-// Optimizer endpoint — not yet implemented on the backend.
-// Returns null on any failure so callers fall back to defaults.
-export type OptimizerResult = {
-    weights: Record<string, number>       // ticker → percentage (sums to 100)
-    expected_return: number               // annualized, %
-    volatility: number                    // annualized, %
+export interface RiskScoreResponse {
+    capacity_score: number
+    tolerance_score: number
+    score: number
+    limited_by: string
+    bucket: string
+    horizon: string
+    min_equity: number     // decimal 0–1
+    max_equity: number     // decimal 0–1
+    notes: string[]
+    questionnaire_version: string
+}
+
+export interface RiskAssessmentResponse extends RiskScoreResponse {
+    id: string
+    investor_id: string
+    created_at: string     // UTC ISO
+    answers: Record<string, unknown>
+}
+
+export interface QuestionnaireQuestion {
+    id: number
+    options: number
+    group: 'capacity' | 'tolerance' | string
+}
+
+export interface QuestionnaireMeta {
+    version: string
+    questions: QuestionnaireQuestion[]
+}
+
+export interface UniverseAsset {
+    ticker: string
+    asset_class: string
+    sector: string | null
+    cap: number           // decimal 0–1
+}
+
+export interface Universe {
+    assets: UniverseAsset[]
+}
+
+export interface OptimizeRequest {
+    investor_id: string
+    snapshot_id?: string | null
+    requested_by?: string | null
+}
+
+export interface MetricsRequest {
+    investor_id: string
+    weights: Record<string, number>   // decimal 0–1
+    snapshot_id?: string | null
+}
+
+export interface MetricsResponse {
+    expected_return: number
+    volatility: number
     sharpe: number
-    snapshot_id?: string
+    binding: string[]
+    violations: string[]
 }
 
-export async function getOptimizedPortfolio(investorId: string): Promise<OptimizerResult | null> {
-    try {
-        const response = await fetch(`${API_BASE}/optimizer/${investorId}`)
-        if (!response.ok) return null
-        return await response.json()
-    } catch {
-        return null
-    }
+export interface PortfolioResponse {
+    id: string
+    investor_id: string
+    assessment_id: string
+    snapshot_id: string
+    created_at: string
+    created_by?: string | null
+    status: string
+    constraints: Record<string, unknown>
+    excluded_sectors: string[]
+    unmatched_exclusions: string[]
+    risk_free_rate: number
+    objective_used: string
+    weights: Record<string, number>   // decimal 0–1
+    expected_return: number
+    volatility: number
+    sharpe: number
+    binding: string[]
 }
+
+export interface AdjustRequest {
+    weights: Record<string, number>   // decimal 0–1
+    adjusted_by: string
+    reason: string
+}
+
+export interface ManagerDecisionRequest {
+    decision: 'approved' | 'rejected'
+    decided_by: string
+    reason?: string | null
+}
+
+export interface ClientDecisionRequest {
+    decision: 'accepted' | 'declined'
+    recorded_by: string
+    notes?: string | null
+    amount?: number | null
+}
+
+export interface PortfolioDecisionResponse {
+    id: string
+    portfolio_id: string
+    timestamp: string
+    actor: string
+    decision: string
+    recorded_by: string
+    reason?: string | null
+    amount?: number | null
+}
+
+export interface ContributionResponse {
+    ticker: string
+    asset_class: string
+    weight: number
+    return_contribution: number
+    risk_share: number
+}
+
+export interface RationaleResponse {
+    portfolio_id: string
+    summary: string
+    profile: string[]
+    rules: string[]
+    binding: string[]
+    contributions: ContributionResponse[]
+    notes: string[]
+    disclaimer: string
+    text: string
+}
+
+export interface TradeResponse {
+    ticker: string
+    action: string
+    amount: number
+    current_weight: number
+    target_weight: number
+}
+
+export interface RebalancingResponse {
+    portfolio_id: string
+    investor_id: string
+    as_of_date: string              // ISO date
+    current_value: number
+    drift_threshold: number
+    rebalancing_suggested: boolean
+    trades: TradeResponse[]
+}
+
+export interface HoldingValuationResponse {
+    ticker: string
+    target_weight: number
+    start_price: number
+    latest_price: number
+    value: number
+    current_weight: number
+    drift: number
+    breached: boolean
+    basis: string
+}
+
+export interface ValuationResponse {
+    portfolio_id: string
+    investor_id: string
+    hypothetical: boolean
+    start_date: string              // ISO date
+    as_of_date: string              // ISO date
+    amount: number
+    current_value: number
+    gain: number
+    gain_pct: number
+    drift_threshold: number
+    rebalancing_suggested: boolean
+    cash_rate?: number | null
+    holdings: HoldingValuationResponse[]
+}
+
+export interface AuditLogResponse {
+    id: string
+    timestamp: string
+    action: string
+    entity_type: string
+    entity_id: string
+    user_id?: string | null
+    reason?: string | null
+    before?: Record<string, unknown> | null
+    after?: Record<string, unknown> | null
+}
+
+export interface AuditLogFilters {
+    entity_id?: string
+    entity_type?: string
+    user_id?: string
+    action?: string
+    limit?: number
+}
+
+// ---------- endpoint functions ----------
+
+export const getHealth = () => request<unknown>('/')
+
+// investors
+export const listInvestors = () => request<InvestorResponse[]>('/investors/')
+export const createInvestorApi = (body: InvestorCreate) =>
+    request<InvestorResponse>('/investors/', { method: 'POST', body })
+export const getInvestorApi = (id: string) =>
+    request<InvestorResponse>(`/investors/${id}`)
+export const updateInvestorApi = (id: string, body: InvestorUpdate) =>
+    request<InvestorResponse>(`/investors/${id}`, { method: 'PUT', body })
+export const deleteInvestor = (id: string) =>
+    request<void>(`/investors/${id}`, { method: 'DELETE' })
+
+// interactions
+export function listInteractions(investorId?: string) {
+    const q = investorId ? `?investor_id=${encodeURIComponent(investorId)}` : ''
+    return request<InteractionResponse[]>(`/interactions/${q}`)
+}
+export const createInteractionApi = (body: InteractionCreate) =>
+    request<InteractionResponse>('/interactions/', { method: 'POST', body })
+
+// risk
+export const scoreRisk = (body: RiskAnswers) =>
+    request<RiskScoreResponse>('/risk/score', { method: 'POST', body })
+export const submitRiskAssessment = (investorId: string, body: RiskAnswers) =>
+    request<RiskAssessmentResponse>(`/investors/${investorId}/risk-assessments`, { method: 'POST', body })
+export const listRiskAssessments = (investorId: string) =>
+    request<RiskAssessmentResponse[]>(`/investors/${investorId}/risk-assessments`)
+export const getQuestionnaireMeta = () =>
+    request<QuestionnaireMeta>('/questionnaire/meta')
+
+// universe
+export const getUniverse = () => request<Universe>('/universe')
+
+// optimize
+export const optimize = (body: OptimizeRequest) =>
+    request<PortfolioResponse>('/optimize', { method: 'POST', body })
+export const computeMetrics = (body: MetricsRequest) =>
+    request<MetricsResponse>('/optimize/metrics', { method: 'POST', body })
+
+// portfolios
+export function listPortfolios(investorId?: string) {
+    const q = investorId ? `?investor_id=${encodeURIComponent(investorId)}` : ''
+    return request<PortfolioResponse[]>(`/portfolios${q}`)
+}
+export const getPortfolio = (id: string) =>
+    request<PortfolioResponse>(`/portfolios/${id}`)
+export const adjustPortfolio = (id: string, body: AdjustRequest) =>
+    request<PortfolioResponse>(`/portfolios/${id}/adjust`, { method: 'POST', body })
+export const managerDecision = (id: string, body: ManagerDecisionRequest) =>
+    request<PortfolioResponse>(`/portfolios/${id}/manager-decision`, { method: 'POST', body })
+export const clientDecision = (id: string, body: ClientDecisionRequest) =>
+    request<PortfolioResponse>(`/portfolios/${id}/client-decision`, { method: 'POST', body })
+export const getDecisions = (id: string) =>
+    request<PortfolioDecisionResponse[]>(`/portfolios/${id}/decisions`)
+export const getRationale = (id: string) =>
+    request<RationaleResponse>(`/portfolios/${id}/rationale`)
+export const getRebalancing = (id: string) =>
+    request<RebalancingResponse>(`/portfolios/${id}/rebalancing`)
+export function getValuation(id: string, investedOn?: string) {
+    const q = investedOn ? `?invested_on=${encodeURIComponent(investedOn)}` : ''
+    return request<ValuationResponse>(`/portfolios/${id}/valuation${q}`)
+}
+
+// drift + audit
+export const getDriftAlerts = () => request<ValuationResponse[]>('/drift-alerts')
+
+export function getAuditLog(filters: AuditLogFilters = {}) {
+    const sp = new URLSearchParams()
+    if (filters.entity_id) sp.set('entity_id', filters.entity_id)
+    if (filters.entity_type) sp.set('entity_type', filters.entity_type)
+    if (filters.user_id) sp.set('user_id', filters.user_id)
+    if (filters.action) sp.set('action', filters.action)
+    if (filters.limit != null) sp.set('limit', String(filters.limit))
+    const q = sp.toString() ? `?${sp}` : ''
+    return request<AuditLogResponse[]>(`/audit-log${q}`)
+}
+
+// ---------- back-compat shims ----------
+// These preserve the old signatures and "swallow errors" behavior of the
+// original api.ts. Later steps migrate each caller to the typed functions
+// above and delete the shim. Don't add new call sites for these.
+//
+// Legacy call sites model nullable fields as `string | undefined`, not
+// `string | null`. The shims strip null → undefined at runtime and
+// advertise that via NoNulls<T> so the existing component types compile
+// unchanged. The primitive endpoint functions above keep the accurate
+// `| null` shape.
+
+type NoNulls<T> = { [K in keyof T]: Exclude<T[K], null> }
+
+function stripNullFields<T>(obj: T): NoNulls<T> {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+        out[k] = v === null ? undefined : v
+    }
+    return out as NoNulls<T>
+}
+
+export async function createInvestor(data: InvestorCreate): Promise<NoNulls<InvestorResponse>> {
+    return stripNullFields(await createInvestorApi(data))
+}
+
+export async function getInvestors(): Promise<NoNulls<InvestorResponse>[]> {
+    return (await listInvestors()).map(stripNullFields)
+}
+
+export async function getInvestor(investorId: string): Promise<NoNulls<InvestorResponse>> {
+    return stripNullFields(await getInvestorApi(investorId))
+}
+
+export async function updateInvestor(investorId: string, data: InvestorUpdate): Promise<NoNulls<InvestorResponse>> {
+    return stripNullFields(await updateInvestorApi(investorId, data))
+}
+
+export async function getInteractions(investorId: string): Promise<NoNulls<InteractionResponse>[]> {
+    try { return (await listInteractions(investorId)).map(stripNullFields) } catch { return [] }
+}
+
+export async function getAllInteractions(): Promise<NoNulls<InteractionResponse>[]> {
+    return (await listInteractions()).map(stripNullFields)
+}
+
+export async function createInteraction(data: InteractionCreate): Promise<NoNulls<InteractionResponse>> {
+    return stripNullFields(await createInteractionApi(data))
+}
+

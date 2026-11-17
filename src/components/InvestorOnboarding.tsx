@@ -1,10 +1,21 @@
 "use client"
 import { useState } from "react"
-import { createInvestor } from "@/lib/api"
+import {
+    createInvestor, toPercent, ApiError,
+    type RiskScoreResponse,
+} from "@/lib/api"
 import RiskQuestionnaire from "@/components/RiskQuestionnaire"
 import { inputStyle, labelStyle, buttonStyle, backButtonStyle } from "@/lib/styles"
 
-const sectors = ["Tobacco", "Weapons", "Fossil Fuels", "Gambling", "Alcohol", "Cannabis"]
+// Sector names shown in the UI. The three in-universe sectors (Banking, IT,
+// Pharma) map to single ETFs; the backend's optimizer will honour exclusions
+// on those. Other sectors are recorded in preferences_constraints but can't
+// be enforced with the current 8-ETF universe — they'll surface as
+// "unmatched" on the resulting portfolio.
+const sectors = [
+    "Banking", "IT", "Pharma",
+    "Tobacco", "Weapons", "Fossil Fuels", "Gambling", "Alcohol", "Cannabis",
+]
 
 // ── SHARED HELPERS (outside component — React rule) ──────────────────────────
 
@@ -59,9 +70,11 @@ export default function InvestorOnboarding() {
     // step 3 — sector exclusions (saved as JSON in DB)
     const [excludedSectors, setExcludedSectors] = useState<string[]>([])
 
-    // from questionnaire (step 4)
-    const [riskScore, setRiskScore] = useState("")
-    const [horizon, setHorizon] = useState("")
+    // from questionnaire (step 4) — the raw answers and the server's preview score
+    const [riskAnswers, setRiskAnswers] = useState<Record<string, number>>({})
+    const [riskPreview, setRiskPreview] = useState<RiskScoreResponse | null>(null)
+    const [submitError, setSubmitError] = useState('')
+    const [submitting, setSubmitting] = useState(false)
 
     // toggles a sector in/out of excluded list
     function toggleSector(sector: string) {
@@ -72,29 +85,34 @@ export default function InvestorOnboarding() {
         )
     }
 
-    // called by RiskQuestionnaire when all 9 questions are done
-    // results sent UP via onComplete prop
-    function handleQuestionnaireComplete(profile: string, investmentHorizon: string) {
-        setRiskScore(profile)
-        setHorizon(investmentHorizon)
+    // called by RiskQuestionnaire after it fetches a preview score from the backend
+    function handleQuestionnaireComplete(answers: Record<string, number>, preview: RiskScoreResponse) {
+        setRiskAnswers(answers)
+        setRiskPreview(preview)
         setStep(5)
     }
 
-    // final submit — sends everything to the API
+    // final submit — sends everything including the raw risk_answers so the
+    // backend creates the investor, persists a real RiskAssessment, and sets
+    // risk_score and investment_horizon from its own scoring (authoritative).
     async function handleFinalSubmit() {
+        if (!riskPreview) return
+        setSubmitting(true)
+        setSubmitError('')
         try {
             await createInvestor({
                 name,
                 total_aum: Number(initialInvestment),
-                risk_score: riskScore,
-                investment_horizon: horizon,
                 demographics: { age: Number(age), income_stability: incomeStability, email, mobile },
                 preferences_constraints: { excluded_sectors: excludedSectors },
-                assigned_manager_id: "manager-001"  // hardcoded until auth is built
+                risk_answers: riskAnswers,
+                assigned_manager_id: "manager-001",  // hardcoded until auth is built
             })
             setStep(6)
-        } catch {
-            alert("Something went wrong, please try again.")
+        } catch (e) {
+            setSubmitError(e instanceof ApiError ? e.message : 'Could not create the investor. Please try again.')
+        } finally {
+            setSubmitting(false)
         }
     }
 
@@ -256,10 +274,14 @@ export default function InvestorOnboarding() {
                     ["Mobile", mobile],
                     ["Initial Investment", `₹${Number(initialInvestment).toLocaleString()}`],
                     ["Age", age],
-                    ["Income Stability", incomeStability.replace(/_/g, " ")],     // "highly_stable" → "highly stable"
-                    ["Excluded Sectors", excludedSectors.join(", ") || "None"],   // array → comma string
-                    ["Risk Profile", riskScore.toUpperCase()],
-                    ["Investment Horizon", horizon.replace(/_/g, " ")]
+                    ["Income Stability", incomeStability.replace(/_/g, " ")],
+                    ["Excluded Sectors", excludedSectors.join(", ") || "None"],
+                    ["Risk Profile", riskPreview ? riskPreview.bucket.toUpperCase() : "—"],
+                    ["Risk Capacity", riskPreview ? String(riskPreview.capacity_score) : "—"],
+                    ["Risk Tolerance", riskPreview ? String(riskPreview.tolerance_score) : "—"],
+                    ["Limited By", riskPreview ? riskPreview.limited_by : "—"],
+                    ["Investment Horizon", riskPreview ? riskPreview.horizon.replace(/_/g, " ") : "—"],
+                    ["Equity Band", riskPreview ? `${toPercent(riskPreview.min_equity)}% – ${toPercent(riskPreview.max_equity)}%` : "—"],
                 ].map(([label, value]) => (
                     <div key={label} style={{
                         display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -279,9 +301,36 @@ export default function InvestorOnboarding() {
                 ))}
             </div>
 
+            {riskPreview && riskPreview.notes.length > 0 && (
+                <div style={{ marginTop: 24 }}>
+                    <p style={{
+                        fontFamily: "var(--font-mono)", fontSize: 11,
+                        color: "rgba(255,255,255,0.4)", textTransform: "uppercase",
+                        letterSpacing: "0.08em", marginBottom: 10,
+                    }}>Notes from the scorer</p>
+                    <ul style={{
+                        paddingLeft: 18, fontFamily: "var(--font-body)", fontSize: 13,
+                        color: "rgba(255,255,255,0.75)", lineHeight: 1.7,
+                    }}>
+                        {riskPreview.notes.map((n, i) => <li key={i}>{n}</li>)}
+                    </ul>
+                </div>
+            )}
+
+            {submitError && (
+                <p style={{
+                    marginTop: 20, color: "#F09595",
+                    fontFamily: "var(--font-body)", fontSize: 13,
+                }}>
+                    {submitError}
+                </p>
+            )}
+
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: "32px" }}>
-                <button onClick={() => setStep(4)} style={backButtonStyle}>← Back</button>
-                <button onClick={handleFinalSubmit} style={buttonStyle(false)}>Confirm & Submit</button>
+                <button onClick={() => setStep(4)} style={backButtonStyle} disabled={submitting}>← Back</button>
+                <button onClick={handleFinalSubmit} style={buttonStyle(submitting || !riskPreview)} disabled={submitting || !riskPreview}>
+                    {submitting ? 'Submitting…' : 'Confirm & Submit'}
+                </button>
             </div>
         </>
     )
@@ -289,7 +338,6 @@ export default function InvestorOnboarding() {
     // ── STEP 6 — Success ─────────────────────────────────────────────────────
     return screen(
         <div style={{ textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: "16px" }}>
-            {/* checkmark */}
             <div style={{
                 width: "60px", height: "60px", borderRadius: "50%",
                 border: "2px solid var(--ivory)",
@@ -308,7 +356,7 @@ export default function InvestorOnboarding() {
             }}>
                 Welcome, {name}. Your risk profile is{" "}
                 <span style={{ fontFamily: "var(--font-mono)", color: "var(--ivory)", fontWeight: 600 }}>
-                    {riskScore.toUpperCase()}
+                    {riskPreview ? riskPreview.bucket.toUpperCase() : '—'}
                 </span>
                 . A manager will be in touch shortly.
             </p>

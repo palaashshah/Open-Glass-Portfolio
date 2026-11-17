@@ -1,123 +1,226 @@
 'use client'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { ETFS } from '@/lib/etfs'
 import {
-  ETFS,
-  defaultWeightsFor,
-  portfolioMetrics,
-  checkConstraints,
-} from '@/lib/etfs'
-import { getOptimizedPortfolio } from '@/lib/api'
+  ApiError, localDate, toPercent, fromPercent,
+  listPortfolios, optimize, computeMetrics, adjustPortfolio, managerDecision,
+  type PortfolioResponse, type MetricsResponse,
+} from '@/lib/api'
 
 type Props = {
   investorId?: string
   investorName?: string
   riskProfile?: string
-  onApprove?: (weights: Record<string, number>) => void
-  onReject?: (reason: string) => void
+  onDecision?: (portfolio: PortfolioResponse) => void
 }
+
+// All numeric weights inside this component are PERCENTAGES (0–100) for
+// easier UI math. The api helpers do decimal↔percent conversion at the
+// edge via toPercent / fromPercent.
 
 export default function ReviewCustomization({
   investorId,
-  investorName = 'Priya Desai',
-  riskProfile = 'moderator',
-  onApprove,
-  onReject,
+  investorName,
+  riskProfile,
+  onDecision,
 }: Props) {
-  const defaults = useMemo(() => defaultWeightsFor(riskProfile), [riskProfile])
-  const [weights, setWeights] = useState<Record<string, number>>(defaults)
-  const [source, setSource] = useState<'defaults' | 'optimizer'>('defaults')
+  const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null)
+  const [weights, setWeights] = useState<Record<string, number>>({})
+  const [loadError, setLoadError] = useState<string>('')
   const [loading, setLoading] = useState(false)
-  const [decision, setDecision] = useState<'pending' | 'approved' | 'rejected'>('pending')
+  const [running, setRunning] = useState(false)
+
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null)
+  const [metricsError, setMetricsError] = useState<string>('')
+  const [metricsLoading, setMetricsLoading] = useState(false)
+
+  const [savingAdjust, setSavingAdjust] = useState(false)
+  const [adjustError, setAdjustError] = useState('')
+  const [deciding, setDeciding] = useState(false)
+  const [decisionError, setDecisionError] = useState('')
   const [rejectReason, setRejectReason] = useState('')
 
-  // reset weights when the profile / investor changes
-  useEffect(() => {
-    setWeights(defaults)
-    setSource('defaults')
-  }, [defaults, investorId])
-
-  // try the optimizer endpoint; fall back silently to the defaults above
+  // Load the most recent portfolio for the investor on mount / id change.
   useEffect(() => {
     if (!investorId) return
     let cancelled = false
     setLoading(true)
-    getOptimizedPortfolio(investorId)
-      .then(result => {
-        if (cancelled || !result) return
-        setWeights(result.weights)
-        setSource('optimizer')
+    setLoadError('')
+    setPortfolio(null)
+    listPortfolios(investorId)
+      .then(list => {
+        if (cancelled) return
+        if (list.length === 0) {
+          setPortfolio(null)
+          return
+        }
+        // backend doesn't guarantee order; take the newest by created_at
+        const latest = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
+        hydrate(latest)
       })
+      .catch(e => { if (!cancelled) setLoadError(formatError(e, 'load portfolios')) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [investorId])
 
-  const total = ETFS.reduce((s, a) => s + (weights[a.ticker] ?? 0), 0)
-  const metrics = useMemo(() => portfolioMetrics(weights), [weights])
-  const violations = useMemo(() => checkConstraints(weights), [weights])
-  const canApprove = violations.length === 0
-
-  function setWeight(ticker: string, value: number) {
-    setWeights(prev => ({ ...prev, [ticker]: value }))
+  function hydrate(p: PortfolioResponse) {
+    setPortfolio(p)
+    const asPct: Record<string, number> = {}
+    for (const t of ETFS.map(e => e.ticker)) asPct[t] = toPercent(p.weights[t] ?? 0)
+    setWeights(asPct)
+    setMetrics(null)
+    setMetricsError('')
+    setAdjustError('')
+    setDecisionError('')
   }
 
-  function normalize() {
-    const s = ETFS.reduce((sum, a) => sum + (weights[a.ticker] ?? 0), 0)
-    if (s === 0) return
-    const scaled = ETFS.reduce((acc, a) => {
-      acc[a.ticker] = Math.round(((weights[a.ticker] ?? 0) / s) * 100)
-      return acc
-    }, {} as Record<string, number>)
-    setWeights(scaled)
+  // Re-run /optimize/metrics whenever weights change (debounced 400ms).
+  const runMetrics = useCallback(async (w: Record<string, number>) => {
+    if (!portfolio) return
+    setMetricsLoading(true)
+    setMetricsError('')
+    try {
+      const body = {
+        investor_id: portfolio.investor_id,
+        snapshot_id: portfolio.snapshot_id,
+        weights: Object.fromEntries(
+          Object.entries(w).map(([k, v]) => [k, fromPercent(v)])
+        ),
+      }
+      const m = await computeMetrics(body)
+      setMetrics(m)
+    } catch (e) {
+      setMetricsError(formatError(e, 'compute metrics'))
+      setMetrics(null)
+    } finally {
+      setMetricsLoading(false)
+    }
+  }, [portfolio])
+
+  useEffect(() => {
+    if (!portfolio) return
+    const t = setTimeout(() => { runMetrics(weights) }, 400)
+    return () => clearTimeout(t)
+  }, [weights, portfolio, runMetrics])
+
+  async function runOptimize() {
+    if (!investorId) return
+    setRunning(true)
+    setLoadError('')
+    try {
+      const p = await optimize({ investor_id: investorId, requested_by: 'manager-001' })
+      hydrate(p)
+    } catch (e) {
+      setLoadError(formatError(e, 'run optimization'))
+    } finally {
+      setRunning(false)
+    }
   }
 
-  function reset() {
-    setWeights(defaults)
-    setSource('defaults')
+  async function saveAdjust() {
+    if (!portfolio) return
+    setSavingAdjust(true)
+    setAdjustError('')
+    try {
+      const body = {
+        weights: Object.fromEntries(
+          Object.entries(weights).map(([k, v]) => [k, fromPercent(v)])
+        ),
+        adjusted_by: 'manager-001',
+        reason: 'Manager-adjusted weights before approval',
+      }
+      const p = await adjustPortfolio(portfolio.id, body)
+      hydrate(p)
+    } catch (e) {
+      setAdjustError(formatError(e, 'save adjustment'))
+    } finally {
+      setSavingAdjust(false)
+    }
   }
 
-  if (decision === 'approved') {
+  async function decide(decision: 'approved' | 'rejected') {
+    if (!portfolio) return
+    if (decision === 'rejected' && !rejectReason.trim()) {
+      setDecisionError('Please provide a reason for rejection.')
+      return
+    }
+    setDeciding(true)
+    setDecisionError('')
+    try {
+      const p = await managerDecision(portfolio.id, {
+        decision,
+        decided_by: 'manager-001',
+        reason: decision === 'rejected' ? rejectReason.trim() : null,
+      })
+      hydrate(p)
+      onDecision?.(p)
+    } catch (e) {
+      setDecisionError(formatError(e, 'record decision'))
+    } finally {
+      setDeciding(false)
+    }
+  }
+
+  const total = useMemo(
+    () => ETFS.reduce((s, a) => s + (weights[a.ticker] ?? 0), 0),
+    [weights]
+  )
+  const violations = metrics?.violations ?? []
+  const canApprove = !!portfolio && violations.length === 0 && Math.round(total) === 100 && portfolio.status === 'proposed'
+
+  if (!investorId) {
+    return <Empty>Select an investor to review their portfolio.</Empty>
+  }
+
+  if (loading) {
+    return <Empty>Loading portfolios for {investorName ?? 'this investor'}…</Empty>
+  }
+
+  if (loadError) {
     return (
       <div style={{ padding: '2rem' }}>
-        <div style={badge('#97C459')}>✓</div>
-        <h1 style={{ fontSize: 24, color: '#FFFFE3', marginBottom: 8 }}>Proposal approved for {investorName}</h1>
-        <p style={{ fontSize: 13, color: '#CBCBCB' }}>PDF proposal is available in the Proposal tab. Audit entry recorded.</p>
-        <button onClick={() => setDecision('pending')} style={btnGhost}>Continue editing</button>
+        <h1 style={h1}>Review &amp; Customize</h1>
+        <ErrorBanner>{loadError}</ErrorBanner>
       </div>
     )
   }
 
-  if (decision === 'rejected') {
+  if (!portfolio) {
     return (
-      <div style={{ padding: '2rem' }}>
-        <div style={badge('#F09595')}>✕</div>
-        <h1 style={{ fontSize: 24, color: '#FFFFE3', marginBottom: 8 }}>Proposal rejected for {investorName}</h1>
-        <p style={{ fontSize: 13, color: '#CBCBCB', maxWidth: 500 }}>Reason: {rejectReason || '(no reason provided)'}</p>
-        <button onClick={() => setDecision('pending')} style={btnGhost}>Back to review</button>
+      <div style={{ padding: '2rem', maxWidth: 720 }}>
+        <h1 style={h1}>Review &amp; Customize</h1>
+        <p style={muted}>No portfolio has been generated for {investorName ?? 'this investor'} yet.</p>
+        <button onClick={runOptimize} disabled={running} style={btnPrimary(running)}>
+          {running ? 'Running optimizer…' : 'Run optimization'}
+        </button>
       </div>
     )
   }
+
+  const decided = portfolio.status !== 'proposed'
 
   return (
     <div style={{ padding: '2rem', maxWidth: 1100 }}>
-      <div style={{ marginBottom: '1.25rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: '1.25rem' }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 500, color: '#FFFFE3', marginBottom: 4 }}>Review &amp; Customize</h1>
-          <p style={{ fontSize: 13, color: '#CBCBCB' }}>
-            Allocation for <span style={{ color: '#FFFFE3' }}>{investorName}</span> · risk profile
-            <span style={{ color: '#a0b4c4', fontFamily: 'monospace', marginLeft: 6 }}>{riskProfile}</span>
+          <h1 style={h1}>Review &amp; Customize</h1>
+          <p style={muted}>
+            Portfolio {portfolio.id.slice(0, 8)}… for
+            <span style={{ color: '#FFFFE3', marginLeft: 6 }}>{investorName ?? 'investor'}</span>
+            {riskProfile && <> · risk profile <span style={mono}>{riskProfile}</span></>}
+            {' · '}snapshot {localDate(portfolio.created_at)}
           </p>
         </div>
-        <span style={{
-          fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em',
-          padding: '4px 8px', borderRadius: 4,
-          background: source === 'optimizer' ? 'rgba(151,196,89,0.15)' : 'rgba(203,203,203,0.12)',
-          color: source === 'optimizer' ? '#97C459' : '#CBCBCB',
-        }}>
-          {loading ? 'Loading optimizer…' : source === 'optimizer' ? 'From optimizer' : 'Profile defaults'}
-        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <StatusBadge status={portfolio.status} />
+          <button onClick={runOptimize} disabled={running || decided} style={btnGhost}>
+            {running ? 'Running…' : 'Re-run optimizer'}
+          </button>
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
+        {/* ── left: editable weights ── */}
         <div style={panel}>
           <p style={panelTitle}>Editable weights · 8 ETF universe</p>
 
@@ -129,44 +232,55 @@ export default function ReviewCustomization({
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#FFFFE3' }}>
                       <span style={{ width: 8, height: 8, borderRadius: 2, background: a.color }} />
-                      <span style={{ fontFamily: 'monospace', color: '#a0b4c4', fontSize: 12 }}>{a.ticker}</span>
+                      <span style={{ ...mono, fontSize: 12, color: '#a0b4c4' }}>{a.ticker}</span>
                       <span style={{ color: '#CBCBCB', fontSize: 12 }}>· {a.label}</span>
                     </span>
-                    <span style={{ fontSize: 12, color: '#CBCBCB', fontFamily: 'monospace' }}>{w.toFixed(0)}%</span>
+                    <span style={{ fontSize: 12, color: '#CBCBCB', ...mono }}>{w.toFixed(1)}%</span>
                   </div>
                   <input
-                    type="range"
-                    min={0}
-                    max={60}
-                    value={w}
-                    onChange={e => setWeight(a.ticker, Number(e.target.value))}
+                    type="range" min={0} max={100} step={0.5} value={w}
+                    disabled={decided || savingAdjust}
+                    onChange={e => setWeights(prev => ({ ...prev, [a.ticker]: Number(e.target.value) }))}
                     style={{ width: '100%', accentColor: a.color }}
                   />
-                  <p style={{ fontSize: 10, color: '#6D8196', marginTop: 2 }}>
-                    {a.note} · μ {(a.expectedReturn * 100).toFixed(1)}% · σ {(a.vol * 100).toFixed(1)}%
-                  </p>
                 </div>
               )
             })}
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-            <button onClick={normalize} style={btnGhost}>Normalize to 100</button>
-            <button onClick={reset} style={btnGhost}>Reset to profile default</button>
+            <button onClick={normalize} disabled={decided} style={btnGhost}>Normalize to 100</button>
+            <button
+              onClick={saveAdjust}
+              disabled={decided || savingAdjust || Math.round(total) !== 100}
+              style={btnPrimary(savingAdjust)}
+            >
+              {savingAdjust ? 'Saving…' : 'Save adjusted weights'}
+            </button>
           </div>
+          {adjustError && <p style={errText}>{adjustError}</p>}
         </div>
 
+        {/* ── right: metrics, violations, decision ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={panel}>
-            <p style={panelTitle}>Live metrics</p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <p style={{ ...panelTitle, marginBottom: 0 }}>Live metrics</p>
+              {metricsLoading && <span style={{ ...mono, fontSize: 10, color: '#6D8196' }}>computing…</span>}
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-              <Metric label="Expected return" value={metrics.expReturn.toFixed(2) + '%'} />
-              <Metric label="Volatility" value={metrics.vol.toFixed(2) + '%'} />
-              <Metric label="Sharpe" value={metrics.sharpe.toFixed(2)} tone={metrics.sharpe > 0.5 ? '#97C459' : '#EF9F27'} />
+              <Metric label="Expected return" value={metrics ? `${toPercent(metrics.expected_return).toFixed(2)}%` : '—'} />
+              <Metric label="Volatility" value={metrics ? `${toPercent(metrics.volatility).toFixed(2)}%` : '—'} />
+              <Metric
+                label="Sharpe"
+                value={metrics ? metrics.sharpe.toFixed(2) : '—'}
+                tone={metrics && metrics.sharpe > 0.5 ? '#97C459' : '#EF9F27'}
+              />
             </div>
             <p style={{ marginTop: 10, fontSize: 11, color: '#6D8196' }}>
-              Sum of weights: {total.toFixed(1)}% · estimates assume ETFs are uncorrelated (real cov matrix comes from the optimizer snapshot).
+              Sum of weights: {total.toFixed(1)}% · metrics and violations come from POST /optimize/metrics against snapshot {portfolio.snapshot_id.slice(0, 8)}….
             </p>
+            {metricsError && <p style={errText}>{metricsError}</p>}
           </div>
 
           <div style={{
@@ -175,70 +289,102 @@ export default function ReviewCustomization({
             borderRadius: 12, padding: '1.25rem',
           }}>
             <p style={{ fontSize: 12, color: violations.length ? '#F09595' : '#97C459', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-              {violations.length ? `${violations.length} constraint violation${violations.length > 1 ? 's' : ''}` : 'All constraints satisfied'}
+              {violations.length
+                ? `${violations.length} constraint violation${violations.length > 1 ? 's' : ''}`
+                : metrics ? 'All constraints satisfied' : 'Awaiting metrics'}
             </p>
-            {violations.length ? (
+            {violations.length > 0 && (
               <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {violations.map(v => (
-                  <li key={v} style={{ fontSize: 12, color: '#FFFFE3', paddingLeft: 12, position: 'relative' }}>
+                {violations.map((v, i) => (
+                  <li key={i} style={{ fontSize: 12, color: '#FFFFE3', paddingLeft: 12, position: 'relative' }}>
                     <span style={{ position: 'absolute', left: 0, color: '#F09595' }}>•</span>
                     {v}
                   </li>
                 ))}
               </ul>
-            ) : (
-              <p style={{ fontSize: 12, color: '#CBCBCB' }}>Ready to approve or send for adjustment.</p>
+            )}
+            {metrics && metrics.binding.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <p style={{ fontSize: 10, color: '#6D8196', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
+                  Binding rules
+                </p>
+                <p style={{ fontSize: 12, color: '#CBCBCB' }}>{metrics.binding.join(' · ')}</p>
+              </div>
             )}
           </div>
 
           <div style={panel}>
-            <p style={panelTitle}>Decision</p>
-            <textarea
-              value={rejectReason}
-              onChange={e => setRejectReason(e.target.value)}
-              placeholder="Reason (required to reject)…"
-              rows={2}
-              style={{
-                width: '100%', padding: '8px 10px', borderRadius: 6,
-                background: 'rgba(255,255,255,0.06)', color: '#FFFFE3',
-                border: '1px solid rgba(203,203,203,0.2)', fontSize: 12,
-                outline: 'none', resize: 'vertical', marginBottom: 10,
-              }}
-            />
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={() => { onApprove?.(weights); setDecision('approved') }}
-                disabled={!canApprove}
-                style={{
-                  flex: 1, padding: '10px 12px', fontSize: 12, borderRadius: 6,
-                  background: canApprove ? '#97C459' : 'rgba(255,255,255,0.1)',
-                  color: canApprove ? '#1c2a10' : 'rgba(255,255,255,0.3)',
-                  border: 'none', fontWeight: 600,
-                  cursor: canApprove ? 'pointer' : 'not-allowed',
-                }}
-              >
-                Approve
-              </button>
-              <button
-                onClick={() => { onReject?.(rejectReason); setDecision('rejected') }}
-                disabled={!rejectReason.trim()}
-                style={{
-                  flex: 1, padding: '10px 12px', fontSize: 12, borderRadius: 6,
-                  background: rejectReason.trim() ? '#F09595' : 'rgba(255,255,255,0.1)',
-                  color: rejectReason.trim() ? '#2a1010' : 'rgba(255,255,255,0.3)',
-                  border: 'none', fontWeight: 600,
-                  cursor: rejectReason.trim() ? 'pointer' : 'not-allowed',
-                }}
-              >
-                Reject
-              </button>
-            </div>
+            <p style={panelTitle}>Manager decision</p>
+            {decided ? (
+              <p style={{ fontSize: 13, color: '#CBCBCB' }}>
+                Status <strong style={{ color: '#FFFFE3' }}>{portfolio.status}</strong> — no further decision can be recorded on this proposal.
+              </p>
+            ) : (
+              <>
+                <textarea
+                  value={rejectReason}
+                  onChange={e => setRejectReason(e.target.value)}
+                  placeholder="Reason (required to reject)…"
+                  rows={2}
+                  disabled={deciding}
+                  style={textareaStyle}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <button
+                    onClick={() => decide('approved')}
+                    disabled={!canApprove || deciding}
+                    style={btnApprove(!canApprove || deciding)}
+                  >
+                    {deciding ? 'Saving…' : 'Approve'}
+                  </button>
+                  <button
+                    onClick={() => decide('rejected')}
+                    disabled={!rejectReason.trim() || deciding}
+                    style={btnReject(!rejectReason.trim() || deciding)}
+                  >
+                    {deciding ? 'Saving…' : 'Reject'}
+                  </button>
+                </div>
+                {decisionError && <p style={errText}>{decisionError}</p>}
+                {!canApprove && !violations.length && Math.round(total) !== 100 && (
+                  <p style={{ fontSize: 11, color: '#6D8196', marginTop: 8 }}>
+                    Weights must sum to 100% before approval (currently {total.toFixed(1)}%).
+                  </p>
+                )}
+              </>
+            )}
           </div>
+
+          {(portfolio.excluded_sectors.length > 0 || portfolio.unmatched_exclusions.length > 0) && (
+            <div style={panel}>
+              <p style={panelTitle}>Sector exclusions</p>
+              {portfolio.excluded_sectors.length > 0 && (
+                <p style={{ fontSize: 12, color: '#FFFFE3', marginBottom: 4 }}>
+                  <span style={{ color: '#97C459' }}>Applied:</span> {portfolio.excluded_sectors.join(', ')}
+                </p>
+              )}
+              {portfolio.unmatched_exclusions.length > 0 && (
+                <p style={{ fontSize: 12, color: '#FFFFE3' }}>
+                  <span style={{ color: '#EF9F27' }}>Unmatched (nothing to exclude in the universe):</span> {portfolio.unmatched_exclusions.join(', ')}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
+
+  function normalize() {
+    const s = ETFS.reduce((sum, a) => sum + (weights[a.ticker] ?? 0), 0)
+    if (s === 0) return
+    const scaled: Record<string, number> = {}
+    ETFS.forEach(a => { scaled[a.ticker] = Math.round(((weights[a.ticker] ?? 0) / s) * 1000) / 10 })
+    setWeights(scaled)
+  }
 }
+
+// ---------- small subcomponents ----------
 
 function Metric({ label, value, tone = '#FFFFE3' }: { label: string; value: string; tone?: string }) {
   return (
@@ -249,27 +395,85 @@ function Metric({ label, value, tone = '#FFFFE3' }: { label: string; value: stri
   )
 }
 
+function StatusBadge({ status }: { status: string }) {
+  const color = status === 'approved' ? '#97C459'
+    : status === 'rejected' ? '#F09595'
+    : status === 'accepted' ? '#6D8196'
+    : '#EF9F27'
+  return (
+    <span style={{
+      fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em',
+      padding: '4px 8px', borderRadius: 4,
+      background: `${color}22`, color,
+    }}>{status}</span>
+  )
+}
+
+function Empty({ children }: { children: React.ReactNode }) {
+  return <div style={{ padding: '3rem', color: '#CBCBCB', fontSize: 14 }}>{children}</div>
+}
+
+function ErrorBanner({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      background: 'rgba(240,149,149,0.08)',
+      border: '0.5px solid rgba(240,149,149,0.35)',
+      borderRadius: 10, padding: '14px 16px', marginTop: 16,
+      color: '#F09595', fontFamily: 'var(--font-body)', fontSize: 13,
+    }}>{children}</div>
+  )
+}
+
+function formatError(e: unknown, action: string): string {
+  if (e instanceof ApiError) return e.message
+  return `Could not ${action}.`
+}
+
+// ---------- styles ----------
+
+const h1 = { fontSize: 22, fontWeight: 500, color: '#FFFFE3', marginBottom: 4 } as const
+const muted = { fontSize: 13, color: '#CBCBCB' } as const
+const mono = { fontFamily: 'monospace' as const }
 const panel = {
   background: 'rgba(255,255,227,0.06)',
   border: '0.5px solid rgba(203,203,203,0.15)',
   borderRadius: 12, padding: '1.25rem',
 } as const
-
 const panelTitle = {
-  fontSize: 12, color: '#CBCBCB', textTransform: 'uppercase' as const, letterSpacing: '0.06em', marginBottom: 12,
-}
+  fontSize: 12, color: '#CBCBCB', textTransform: 'uppercase' as const,
+  letterSpacing: '0.06em', marginBottom: 12,
+} as const
+const textareaStyle = {
+  width: '100%', padding: '8px 10px', borderRadius: 6,
+  background: 'rgba(255,255,255,0.06)', color: '#FFFFE3',
+  border: '1px solid rgba(203,203,203,0.2)', fontSize: 12,
+  outline: 'none', resize: 'vertical' as const,
+} as const
+const errText = { marginTop: 10, color: '#F09595', fontSize: 12 }
+
+const btnPrimary = (disabled: boolean) => ({
+  padding: '8px 14px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none',
+  background: disabled ? 'rgba(255,255,255,0.1)' : '#FFFFE3',
+  color: disabled ? 'rgba(255,255,255,0.4)' : '#4A4A4A',
+  cursor: disabled ? 'not-allowed' : 'pointer',
+}) as const
 
 const btnGhost = {
   padding: '7px 12px', fontSize: 12, borderRadius: 6,
   background: 'transparent', border: '1px solid rgba(203,203,203,0.3)',
-  color: '#FFFFE3', cursor: 'pointer', marginTop: 20,
+  color: '#FFFFE3', cursor: 'pointer',
 } as const
 
-function badge(color: string) {
-  return {
-    width: 60, height: 60, borderRadius: '50%',
-    border: `2px solid ${color}`, color,
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    fontSize: 26, marginBottom: 16,
-  } as const
-}
+const btnApprove = (disabled: boolean) => ({
+  flex: 1, padding: '10px 12px', fontSize: 12, borderRadius: 6, border: 'none',
+  background: disabled ? 'rgba(255,255,255,0.1)' : '#97C459',
+  color: disabled ? 'rgba(255,255,255,0.3)' : '#1c2a10',
+  fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer',
+}) as const
+
+const btnReject = (disabled: boolean) => ({
+  flex: 1, padding: '10px 12px', fontSize: 12, borderRadius: 6, border: 'none',
+  background: disabled ? 'rgba(255,255,255,0.1)' : '#F09595',
+  color: disabled ? 'rgba(255,255,255,0.3)' : '#2a1010',
+  fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer',
+}) as const
