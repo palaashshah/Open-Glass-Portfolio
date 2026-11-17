@@ -374,9 +374,9 @@ export function ProposalReport({ investorId, investorName }: ProposalReportProps
           </table>
         )}
 
-        {rationale && (
-          <p style={{ fontSize: 11, color: '#999', marginTop: 20, fontStyle: 'italic' }}>{rationale.disclaimer}</p>
-        )}
+        {/* rationale.text already contains the disclaimer as its tail — no
+            separate render needed, otherwise it shows up twice (once at the
+            end of the rationale block, once after the audit trail). */}
       </div>
     </div>
   )
