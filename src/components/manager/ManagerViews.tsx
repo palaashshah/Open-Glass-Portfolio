@@ -315,7 +315,7 @@ export function ProposalReport({ investorId, investorName }: ProposalReportProps
           Volatility {toPercent(portfolio.volatility).toFixed(2)}% ·
           Sharpe {portfolio.sharpe.toFixed(2)} ·
           Risk-free {toPercent(portfolio.risk_free_rate).toFixed(2)}% ·
-          Objective <span style={{ fontFamily: 'monospace' }}>{portfolio.objective_used}</span>.
+          Objective {formatObjective(portfolio.objective_used)}.
         </p>
 
         {portfolio.binding.length > 0 && (
@@ -342,9 +342,13 @@ export function ProposalReport({ investorId, investorName }: ProposalReportProps
         {rationale && (
           <>
             <h2 style={sectionHead}>Rationale</h2>
-            <p style={{ fontSize: 13, lineHeight: 1.6 }}>{rationale.summary}</p>
-            {rationale.text && (
-              <pre style={{ fontFamily: 'inherit', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.6, marginTop: 10 }}>{rationale.text}</pre>
+            {/* The backend's rationale.text is the full narrative and already
+                includes the summary line at the top; only fall back to
+                rationale.summary if text is empty, otherwise we print it twice. */}
+            {rationale.text ? (
+              <pre style={{ fontFamily: 'inherit', whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.6 }}>{rationale.text}</pre>
+            ) : (
+              <p style={{ fontSize: 13, lineHeight: 1.6 }}>{rationale.summary}</p>
             )}
           </>
         )}
@@ -449,6 +453,9 @@ export function DriftAlerts({ onOpen }: DriftAlertsProps) {
 export function AuditLog({ investors }: { investors: Investor[] }) {
   const [entries, setEntries] = useState<AuditLogResponse[] | null>(null)
   const [error, setError] = useState('')
+  // Portfolio → investor map so portfolio events can be labelled with the
+  // investor's name instead of a raw portfolio id fragment.
+  const [portfolioOwner, setPortfolioOwner] = useState<Map<string, string>>(new Map())
 
   useEffect(() => {
     let cancelled = false
@@ -458,6 +465,21 @@ export function AuditLog({ investors }: { investors: Investor[] }) {
     return () => { cancelled = true }
   }, [])
 
+  useEffect(() => {
+    if (investors.length === 0) return
+    let cancelled = false
+    Promise.all(investors.map(inv => listPortfolios(inv.id).catch(() => [] as PortfolioResponse[])))
+      .then(lists => {
+        if (cancelled) return
+        const m = new Map<string, string>()
+        investors.forEach((inv, i) => {
+          for (const p of lists[i]) m.set(p.id, inv.id)
+        })
+        setPortfolioOwner(m)
+      })
+    return () => { cancelled = true }
+  }, [investors])
+
   const investorNameById = useMemo(() => {
     const m = new Map<string, string>()
     for (const inv of investors) m.set(inv.id, inv.name)
@@ -465,8 +487,15 @@ export function AuditLog({ investors }: { investors: Investor[] }) {
   }, [investors])
 
   function describe(e: AuditLogResponse): string {
-    if (e.entity_type === 'investor') return investorNameById.get(e.entity_id) ?? `Investor ${e.entity_id.slice(0, 8)}…`
-    if (e.entity_type === 'portfolio') return `Portfolio ${e.entity_id.slice(0, 8)}…`
+    if (e.entity_type === 'investor') {
+      return investorNameById.get(e.entity_id) ?? `Investor ${e.entity_id.slice(0, 8)}…`
+    }
+    if (e.entity_type === 'portfolio') {
+      const ownerId = portfolioOwner.get(e.entity_id)
+      const ownerName = ownerId ? investorNameById.get(ownerId) : undefined
+      const short = `Portfolio ${e.entity_id.slice(0, 8)}…`
+      return ownerName ? `${ownerName} · ${short}` : short
+    }
     return `${e.entity_type} ${e.entity_id.slice(0, 8)}…`
   }
 
@@ -614,7 +643,7 @@ export function InvestorPortalView({ investor }: { investor?: Investor | null })
             <MetricBlock label="Expected return" value={toPercent(portfolio.expected_return).toFixed(2) + '%'} />
             <MetricBlock label="Volatility" value={toPercent(portfolio.volatility).toFixed(2) + '%'} />
             <MetricBlock label="Sharpe" value={portfolio.sharpe.toFixed(2)} />
-            <MetricBlock label="Objective" value={portfolio.objective_used} />
+            <MetricBlock label="Objective" value={formatObjective(portfolio.objective_used)} />
           </div>
         </div>
       </div>
@@ -773,6 +802,17 @@ export function ClientSignOffPanel({ investorId, investorName, onDecided }: Clie
       </div>
     </div>
   )
+}
+
+// Converts the backend's programmatic objective key into human prose.
+function formatObjective(key: string): string {
+  const map: Record<string, string> = {
+    max_sharpe: 'Maximum Sharpe ratio',
+    min_volatility: 'Minimum volatility',
+    efficient_return: 'Target return',
+    efficient_risk: 'Target risk',
+  }
+  return map[key] ?? key.replace(/_/g, ' ')
 }
 
 // ── shared bits ──────────────────────────────────────────────────────────────
