@@ -368,19 +368,6 @@ run the API, the scripts and the tests from there.
 
 - **Estimates.** Expected returns are five-year historical averages, so the optimizer favours
   whatever did best in that window.
-- **Universe.** Eight ETFs against a target of 10 to 15. Sector exclusions work for banking, IT
-  and pharma. Ethical categories such as tobacco are recorded and reported as not applied,
-  because no instrument matches them.
-- **Cash.** The liquid fund's stored price series is flat, so cash holdings are valued by
-  accruing interest at the risk-free rate stored with the portfolio. The config sets it to
-  0.0557, taken from the RBI 91-day Treasury bill cut-off yield of 7 October 2026. This is an
-  assumption, not market data, and it differs from the optimizer's own estimate for the liquid
-  fund, which comes from the prices.
 - **Paper only.** Valuation and rebalancing are calculations. The system places no trades.
 - **No login.** The manager is hardcoded as `manager-001` and the API has no access checks.
-- **Audit log.** Investor changes, assessments, optimizations, adjustments and decisions each
-  write an audit row. Logging an interaction does not.
-- **Frontend gaps.** Rebalancing trades and assessment history are available from the API but
-  not shown in the app. An existing investor cannot retake the questionnaire from the app. The
-  Submission Queue lists the first six investors, not only those awaiting review.
-- **Dependencies.** `requirements.txt` does not pin versions.
+
