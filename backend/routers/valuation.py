@@ -15,25 +15,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import MarketData, Portfolio, PortfolioDecision
+from models import Portfolio, PortfolioDecision
 from schemas import RebalancingResponse, ValuationResponse
+from valuation.prices import stored_prices
 from valuation.valuation import Valuation, rebalancing_trades, value_portfolio
 
 router = APIRouter(tags=["Valuation"])
 
-
-def load_prices(db: Session, tickers: list[str]) -> pd.DataFrame:
-    rows = (
-        db.query(MarketData.asset_symbol, MarketData.date, MarketData.close_price)
-        .filter(MarketData.asset_symbol.in_(tickers))
-        .all()
-    )
-    if not rows:
-        raise HTTPException(status_code=409, detail="No stored prices. Run scripts/data.py first.")
-    frame = pd.DataFrame(rows, columns=["ticker", "date", "price"])
-    frame["price"] = frame["price"].astype(float)
-    frame["date"] = pd.to_datetime(frame["date"])
-    return frame.pivot(index="date", columns="ticker", values="price").sort_index()
+NOT_ACCEPTED = "This portfolio has not been accepted by the client, so there is nothing to value."
+NO_PRICES = "No stored prices. Run scripts/data.py first."
 
 
 def get_portfolio_or_404(db: Session, portfolio_id: str) -> Portfolio:
@@ -43,27 +33,41 @@ def get_portfolio_or_404(db: Session, portfolio_id: str) -> Portfolio:
     return portfolio
 
 
-def compute_valuation(db: Session, portfolio: Portfolio, invested_on: Optional[date]) -> Valuation:
-    accepted = (
+def acceptances(db: Session, portfolio_ids: list[str]) -> dict[str, PortfolioDecision]:
+    """The client's acceptance of each portfolio, found with one query.
+    Portfolios that were never accepted are simply missing from the result."""
+    if not portfolio_ids:
+        return {}
+    rows = (
         db.query(PortfolioDecision)
-        .filter(PortfolioDecision.portfolio_id == portfolio.id,
+        .filter(PortfolioDecision.portfolio_id.in_(portfolio_ids),
                 PortfolioDecision.actor == "client",
                 PortfolioDecision.decision == "accepted")
-        .order_by(PortfolioDecision.timestamp.desc())
-        .first()
+        .order_by(PortfolioDecision.timestamp)
+        .all()
     )
-    if accepted is None:
-        raise HTTPException(
-            status_code=409,
-            detail="This portfolio has not been accepted by the client, so there is nothing to value.")
+    return {row.portfolio_id: row for row in rows}      # the latest one wins
 
-    held = [t for t, w in portfolio.weights.items() if w > 0]
-    prices = load_prices(db, held)
+
+def value_accepted(portfolio: Portfolio, acceptance: PortfolioDecision, prices: pd.DataFrame,
+                   invested_on: Optional[date] = None) -> Valuation:
+    """Value one accepted portfolio. Raises ValueError with a readable reason."""
+    if prices.empty:
+        raise ValueError(NO_PRICES)
+    if acceptance.amount is None:
+        raise ValueError("The acceptance on record has no invested amount.")
+    return value_portfolio(
+        portfolio.weights, float(acceptance.amount), prices,
+        invested_on or acceptance.timestamp.date(),
+        cash_rate=portfolio.risk_free_rate)
+
+
+def compute_valuation(db: Session, portfolio: Portfolio, invested_on: Optional[date]) -> Valuation:
+    acceptance = acceptances(db, [portfolio.id]).get(portfolio.id)
+    if acceptance is None:
+        raise HTTPException(status_code=409, detail=NOT_ACCEPTED)
     try:
-        return value_portfolio(
-            portfolio.weights, float(accepted.amount), prices,
-            invested_on or accepted.timestamp.date(),
-            cash_rate=portfolio.risk_free_rate)
+        return value_accepted(portfolio, acceptance, stored_prices(db), invested_on)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
@@ -105,12 +109,19 @@ def get_rebalancing(portfolio_id: str, db: Session = Depends(get_db)):
 @router.get("/drift-alerts", response_model=list[ValuationResponse])
 def drift_alerts(db: Session = Depends(get_db)):
     """Every accepted portfolio where a holding has drifted past the threshold."""
+    portfolios = db.query(Portfolio).filter(Portfolio.status == "accepted").all()
+    accepted = acceptances(db, [p.id for p in portfolios])
+    prices = stored_prices(db) if accepted else pd.DataFrame()
+
     alerts = []
-    for portfolio in db.query(Portfolio).filter(Portfolio.status == "accepted").all():
+    for portfolio in portfolios:
+        acceptance = accepted.get(portfolio.id)
+        if acceptance is None:
+            continue        # no acceptance record; nothing to report
         try:
-            valuation = compute_valuation(db, portfolio, None)
-        except HTTPException:
-            continue        # no prices or no acceptance record; nothing to report
+            valuation = value_accepted(portfolio, acceptance, prices)
+        except ValueError:
+            continue        # no prices for it; nothing to report
         if valuation.rebalancing_suggested:
             alerts.append(valuation_response(portfolio, valuation, False))
     return alerts

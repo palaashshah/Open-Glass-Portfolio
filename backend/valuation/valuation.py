@@ -38,6 +38,7 @@ class Holding:
 class Valuation:
     start_date: date         # the price date actually used for the investment
     as_of_date: date         # the latest price date available
+    days_held: int           # calendar days between the two dates
     amount: float
     current_value: float
     gain: float
@@ -91,6 +92,7 @@ def value_portfolio(weights: dict, amount: float, prices: pd.DataFrame,
     return Valuation(
         start_date=before.index[-1].date(),
         as_of_date=series.index[-1].date(),
+        days_held=days_held,
         amount=amount,
         current_value=total,
         gain=total - amount,

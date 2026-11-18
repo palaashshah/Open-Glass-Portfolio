@@ -10,3 +10,4 @@ pydantic
 yfinance
 pyportfolioopt
 pytest
+cvxpy

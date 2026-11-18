@@ -55,3 +55,7 @@ def test_rebalancing_trades_restore_the_approved_weights():
     trades = {t.ticker: t for t in rebalancing_trades(v)}
     assert trades["A"].action == "sell" and trades["A"].amount == pytest.approx(25.0)   # 100 down to 75
     assert trades["B"].action == "buy" and trades["B"].amount == pytest.approx(25.0)    # 50 up to 75
+
+def test_reports_the_days_between_investment_and_valuation():
+    v = value_portfolio({"A": 1.0}, 100.0, prices(), date(2026, 1, 1))
+    assert (v.start_date, v.as_of_date, v.days_held) == (date(2026, 1, 1), date(2026, 1, 5), 4)

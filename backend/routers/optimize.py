@@ -30,6 +30,8 @@ from schemas import (
 from scoring.scoring import constraints_for_score
 from scripts.data import load_snapshot
 from rationale.generator import build_rationale
+from audit_trail import record_audit
+from workflow.status import OPEN_STATUSES
 
 router = APIRouter(tags=["Optimization"])
 
@@ -88,13 +90,28 @@ def run_optimization(body: OptimizeRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=409, detail=str(exc))
 
     now = datetime.now(timezone.utc)
+    portfolio_id = str(uuid.uuid4())
+    created_by = body.requested_by or investor.assigned_manager_id
+
+    # An investor has at most one portfolio awaiting a decision. A new run
+    # replaces any earlier one that is still proposed or approved. The accepted
+    # portfolio, if there is one, stays active until the client accepts another.
+    for earlier in (db.query(Portfolio)
+                    .filter(Portfolio.investor_id == investor.id,
+                            Portfolio.status.in_(OPEN_STATUSES))
+                    .all()):
+        record_audit(db, created_by, "portfolio.superseded", "portfolio", earlier.id,
+                     reason=f"Replaced by a new optimizer run, portfolio {portfolio_id}",
+                     before={"status": earlier.status}, after={"status": "superseded"})
+        earlier.status = "superseded"
+
     portfolio = Portfolio(
-        id=str(uuid.uuid4()),
+        id=portfolio_id,
         investor_id=investor.id,
         assessment_id=assessment.id,
         snapshot_id=snapshot_id,
         created_at=now,
-        created_by=body.requested_by or investor.assigned_manager_id,
+        created_by=created_by,
         status="proposed",
         constraints={**asdict(constraints), "per_asset_cap": PER_ASSET_CAP, "asset_caps": dict(ASSET_CAPS)},
         excluded_sectors=matched,
@@ -140,10 +157,18 @@ def recompute_metrics(body: MetricsRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/portfolios", response_model=list[PortfolioResponse])
-def list_portfolios(investor_id: Optional[str] = None, db: Session = Depends(get_db)):
+def list_portfolios(investor_id: Optional[str] = None, include_superseded: bool = False,
+                    db: Session = Depends(get_db)):
+    """Saved portfolios, newest first. A superseded portfolio is one that was
+    replaced (by a saved edit, a newer optimizer run or a newer accepted
+    portfolio). Those are history, not something to show as current, so they
+    are left out unless include_superseded=true is passed. Nothing is deleted:
+    each one can still be read by id and stays in the audit log."""
     query = db.query(Portfolio)
     if investor_id:
         query = query.filter(Portfolio.investor_id == investor_id)
+    if not include_superseded:
+        query = query.filter(Portfolio.status != "superseded")
     return query.order_by(Portfolio.created_at.desc()).all()
 
 
@@ -204,8 +229,11 @@ def adjust_weights(portfolio_id: str, body: AdjustRequest, db: Session = Depends
     weights = pd.Series(body.weights, dtype=float).reindex(mu.index).fillna(0.0).round(6)
     constraints = stored_constraints(source)
     expected_return, volatility, sharpe = portfolio_metrics(weights, mu, cov, source.risk_free_rate)
+    # Checked against the limits stored with the original, including its
+    # per-instrument caps (portfolios saved before those were stored use today's).
     binding, violations = evaluate_constraints(
-        weights, volatility, constraints, frozenset(source.excluded_sectors))
+        weights, volatility, constraints, frozenset(source.excluded_sectors),
+        asset_caps=source.constraints.get("asset_caps"))
     if violations:
         raise HTTPException(status_code=422, detail={
             "message": "The adjusted weights break one or more rules, so they were not saved.",

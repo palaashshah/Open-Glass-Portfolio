@@ -1,32 +1,42 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
+from audit_trail import record_audit
 from database import get_db
-from models import Interaction 
-from schemas import InteractionCreate, InteractionUpdate, InteractionResponse
+from models import Interaction, Investor
+from schemas import InteractionCreate, InteractionResponse
 
 router = APIRouter(
-    prefix="/interactions",  
-    tags=["Interactions"]    
+    prefix="/interactions",
+    tags=["Interactions"]
 )
 
 @router.post("/", response_model=InteractionResponse)
 #                   ↑
 #                   InteractionCreate is what comes IN. InteractionResponse is what goes OUT.
-def create_interactions(interaction: InteractionCreate, db: Session= Depends(get_db)):
+def create_interactions(interaction: InteractionCreate, db: Session = Depends(get_db)):
+    investor = db.query(Investor).filter(Investor.id == interaction.investor_id).first()
+    if not investor:
+        raise HTTPException(status_code=404, detail="Investor not found")
 
     new_interaction = Interaction(
-        id=str(uuid.uuid4()), 
-        **interaction.model_dump() 
+        id=str(uuid.uuid4()),
+        **interaction.model_dump()
     )
-
     if not new_interaction.timestamp:
-        new_interaction.timestamp = datetime.utcnow()
-    db.add(new_interaction)     
-    db.commit()               
+        new_interaction.timestamp = datetime.now(timezone.utc)
+    db.add(new_interaction)
+
+    # Logging an interaction changes data, so it leaves an audit row like every
+    # other change. Saved in the same commit as the interaction itself.
+    record_audit(db, interaction.manager_id, "interaction.logged", "interaction", new_interaction.id,
+                 after={"investor_id": investor.id,
+                        "interaction_type": new_interaction.interaction_type,
+                        "notes": new_interaction.notes})
+    db.commit()
     db.refresh(new_interaction)
     return new_interaction
 
@@ -36,15 +46,12 @@ def get_interactions(investor_id: Optional[str] = None, db: Session = Depends(ge
     # if investor_id is provided → filter by it
     # if not provided → return everything
 
+    query = db.query(Interaction)
     if investor_id:
         # filter by investor
-        interactions = db.query(Interaction).filter(Interaction.investor_id == investor_id).all()
+        query = query.filter(Interaction.investor_id == investor_id)
         # db query => Interaction, where Interaction.investor_id == {investor_id}
-    else:
-        # no filter — return all interactions
-        interactions = db.query(Interaction).all()
+    # no filter — return all interactions
 
-    if not interactions:
-        raise HTTPException(status_code=404, detail="No interactions found")
-    
-    return interactions
+    # No interactions is a normal answer, not an error: return an empty list.
+    return query.order_by(Interaction.timestamp).all()

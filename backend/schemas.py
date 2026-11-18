@@ -16,8 +16,6 @@ class InvestorCreate(BaseModel):
     name: str
     demographics: Optional[dict] = None
     total_aum: Optional[float] = None
-    investment_horizon: Optional[str] = None
-    risk_score: Optional[str] = None
     preferences_constraints: Optional[dict] = None
     risk_answers: Optional[dict[int, int]] = None   # {question_id: option_index}; scored by the server
     assigned_manager_id: str
@@ -27,8 +25,6 @@ class InvestorUpdate(BaseModel):
     name: Optional[str] = None
     demographics: Optional[dict] = None
     total_aum: Optional[float] = None
-    investment_horizon: Optional[str] = None
-    risk_score: Optional[str] = None
     preferences_constraints: Optional[dict] = None
     assigned_manager_id: Optional[str] = None
     
@@ -206,6 +202,7 @@ class ValuationResponse(BaseModel):
     hypothetical: bool          # true when an invested_on date was supplied
     start_date: date
     as_of_date: date
+    days_held: int
     amount: float
     current_value: float
     gain: float
@@ -249,3 +246,33 @@ class RebalancingResponse(BaseModel):
     drift_threshold: float
     rebalancing_suggested: bool
     trades: list[TradeResponse]
+
+class OverviewTotals(BaseModel):
+    clients: int
+    invested_clients: int              # clients with an accepted portfolio that could be valued
+    amount_invested: float
+    current_value: float
+    gain: float
+    gain_pct: float
+    as_of_date: Optional[date] = None  # the latest stored price date
+    stage_counts: dict[str, int]       # how many investors are in each stage
+
+class InvestorOverview(BaseModel):
+    investor: InvestorResponse
+    risk_bucket: Optional[str] = None      # from the latest assessment; None if there is none
+    horizon: Optional[str] = None
+    assessment: Optional[RiskAssessmentResponse] = None
+    stage: str                             # needs_questionnaire | needs_optimization | awaiting_manager | awaiting_client | invested
+    stage_label: str                       # the same thing in words
+    in_queue: bool                         # true when the manager has something to do
+    active_portfolio: Optional[PortfolioResponse] = None    # the accepted portfolio the money is in
+    pending_portfolio: Optional[PortfolioResponse] = None   # a newer proposal still awaiting a decision
+    valuation: Optional[ValuationResponse] = None           # of the active portfolio
+    valuation_note: Optional[str] = None                    # why there is no valuation, if there should be one
+
+class OverviewResponse(BaseModel):
+    totals: OverviewTotals
+    investors: list[InvestorOverview]
+
+class InvestorDetailResponse(InvestorOverview):
+    interactions: list[InteractionResponse]
