@@ -3,12 +3,14 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   ApiError, localTime, localDate, toPercent,
   getInvestors, getInteractions, getAllInteractions,
-  listPortfolios, getValuation, deleteInvestor,
+  getOverview, getInvestorOverview, submitRiskAssessment, deleteInvestor,
   type InvestorResponse, type PortfolioResponse, type ValuationResponse,
+  type InvestorOverview, type RiskScoreResponse,
 } from '@/lib/api'
 import { ETFS } from '@/lib/etfs'
 
 import InvestorOnboarding from '@/components/InvestorOnboarding'
+import RiskQuestionnaire from '@/components/RiskQuestionnaire'
 import ReviewCustomization from '@/components/manager/ReviewCustomization'
 import {
   SubmissionQueue,
@@ -52,6 +54,7 @@ type ViewKey =
   | 'submissions'
   | 'investors'
   | 'investor-detail'
+  | 'retake-questionnaire'
   | 'review'
   | 'rationale'
   | 'proposal'
@@ -218,6 +221,7 @@ export default function AppShell() {
             investor={selectedInvestor}
             onEditReview={() => setActiveView('review')}
             onOpenProposal={() => setActiveView('proposal')}
+            onRetakeQuestionnaire={() => setActiveView('retake-questionnaire')}
             onDeleted={() => {
               setSelectedInvestorId(null)
               setActiveView('investors')
@@ -227,6 +231,15 @@ export default function AppShell() {
         )}
         {activeView === 'investor-detail' && !selectedInvestor && (
           <EmptyState message="No investor selected. Open one from the Investors or Submission Queue view." />
+        )}
+        {activeView === 'retake-questionnaire' && selectedInvestor && (
+          <RetakeQuestionnaireView
+            investor={selectedInvestor}
+            onDone={() => setActiveView('investor-detail')}
+          />
+        )}
+        {activeView === 'retake-questionnaire' && !selectedInvestor && (
+          <EmptyState message="No investor selected." />
         )}
         {activeView === 'review' && (
           <ReviewCustomization
@@ -369,80 +382,52 @@ type DashboardTotals = {
 
 type DashboardData = {
   totals: DashboardTotals
-  statusCounts: Record<string, number>   // keyed by latest-portfolio status
+  statusCounts: Record<string, number>   // keyed by server stage (needs_questionnaire etc.)
+  investorOverviews: InvestorOverview[]
   loading: boolean
   error: string
 }
 
-function useDashboardData(investors: Investor[]): DashboardData {
+// Dashboard & investor list both use GET /overview — one call for everything.
+// Prefer this over listPortfolios + getValuation per investor; the backend
+// handles aggregation (invested_clients, amount_invested, stage_counts) and
+// returns one row per investor with the same shape used elsewhere.
+function useDashboardData(): DashboardData {
   const [totals, setTotals] = useState<DashboardTotals>({
     totalInvested: 0, totalCurrentValue: 0, totalGain: 0, gainPct: 0,
     pendingReview: 0, acceptedCount: 0, asOf: null, hasValuationData: false,
   })
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({})
-  const [loading, setLoading] = useState(false)
+  const [investorOverviews, setInvestorOverviews] = useState<InvestorOverview[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (investors.length === 0) {
-      setTotals(t => ({ ...t, totalInvested: 0, totalCurrentValue: 0, totalGain: 0, gainPct: 0, pendingReview: 0, acceptedCount: 0, hasValuationData: false }))
-      setStatusCounts({})
-      return
-    }
     let cancelled = false
     setLoading(true)
     setError('')
-
-    ;(async () => {
-      try {
-        const portfolioLists = await Promise.all(investors.map(inv => listPortfolios(inv.id).catch(() => [] as PortfolioResponse[])))
-        let pendingReview = 0
-        let acceptedCount = 0
-        const acceptedPortfolios: PortfolioResponse[] = []
-        const counts: Record<string, number> = {}
-        for (const list of portfolioLists) {
-          const sorted = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at))
-          const latest = sorted[0]
-          if (!latest) continue
-          counts[latest.status] = (counts[latest.status] ?? 0) + 1
-          if (latest.status === 'proposed') pendingReview += 1
-          const accepted = sorted.find(p => p.status === 'accepted')
-          if (accepted) { acceptedCount += 1; acceptedPortfolios.push(accepted) }
-        }
-
-        const valuations = await Promise.all(
-          acceptedPortfolios.map(p => getValuation(p.id).catch(() => null as ValuationResponse | null))
-        )
-        let totalInvested = 0, totalCurrentValue = 0
-        let latestAsOf: string | null = null
-        for (const v of valuations) {
-          if (!v) continue
-          totalInvested += v.amount
-          totalCurrentValue += v.current_value
-          if (!latestAsOf || v.as_of_date > latestAsOf) latestAsOf = v.as_of_date
-        }
-        const gain = totalCurrentValue - totalInvested
-        const gainPct = totalInvested > 0 ? (gain / totalInvested) : 0
-
-        if (!cancelled) {
-          setTotals({
-            totalInvested, totalCurrentValue, totalGain: gain, gainPct,
-            pendingReview, acceptedCount, asOf: latestAsOf,
-            hasValuationData: valuations.some(v => v !== null),
-          })
-          setStatusCounts(counts)
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load valuations.')
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    })()
-
+    getOverview()
+      .then(o => {
+        if (cancelled) return
+        setTotals({
+          totalInvested: o.totals.amount_invested,
+          totalCurrentValue: o.totals.current_value,
+          totalGain: o.totals.gain,
+          gainPct: o.totals.gain_pct,
+          pendingReview: o.totals.stage_counts.awaiting_manager ?? 0,
+          acceptedCount: o.totals.invested_clients,
+          asOf: o.totals.as_of_date,
+          hasValuationData: o.totals.invested_clients > 0,
+        })
+        setStatusCounts(o.totals.stage_counts as Record<string, number>)
+        setInvestorOverviews(o.investors)
+      })
+      .catch(e => { if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the dashboard.') })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [investors])
+  }, [])
 
-  return { totals, statusCounts, loading, error }
+  return { totals, statusCounts, investorOverviews, loading, error }
 }
 
 // ── charts ───────────────────────────────────────────────────────────────────
@@ -543,8 +528,7 @@ const chartTitle = {
 const chartSubtle = { color: '#6D8196', fontSize: 10, textTransform: 'none' as const, letterSpacing: 0 }
 
 function DashboardView({ investors, loading, onOpen }: { investors: Investor[]; loading: boolean; onOpen: (id: string) => void }) {
-  const totalAUM = investors.reduce((s, i) => s + (i.total_aum ?? 0), 0)
-  const { totals, statusCounts, loading: totalsLoading, error: totalsError } = useDashboardData(investors)
+  const { totals, statusCounts, investorOverviews, loading: dashLoading, error: dashError } = useDashboardData()
 
   const gainValue = totals.hasValuationData
     ? (totals.totalGain >= 0 ? '+' : '') + '₹' + Math.round(totals.totalGain).toLocaleString('en-IN')
@@ -553,33 +537,48 @@ function DashboardView({ investors, loading, onOpen }: { investors: Investor[]; 
     ? (totals.gainPct >= 0 ? '+' : '') + toPercent(totals.gainPct).toFixed(2) + '%'
     : undefined
 
+  // Flatten the server-side investor list to our local shape for the charts
+  // and "Recent clients" tile. Normalises nulls to undefined and uses the
+  // authoritative risk_bucket / horizon from the overview row, not the
+  // (deprecated) overridable fields on the investor record itself.
+  const investorsFromOverview: Investor[] = investorOverviews.map(o => ({
+    id: o.investor.id,
+    name: o.investor.name,
+    assigned_manager_id: o.investor.assigned_manager_id,
+    total_aum: o.investor.total_aum ?? undefined,
+    demographics: o.investor.demographics ?? undefined,
+    preferences_constraints: o.investor.preferences_constraints ?? undefined,
+    risk_score: o.risk_bucket ?? undefined,
+    investment_horizon: o.horizon ?? undefined,
+  }))
+
   return (
     <div style={{ padding: '2rem' }}>
       <h1 style={{ fontSize: 22, fontWeight: 500, color: '#FFFFE3', marginBottom: '1.5rem' }}>Dashboard</h1>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: '1.5rem' }}>
-        <StatCard label="Total clients" value={loading ? '…' : String(investors.length)} />
-        <StatCard label="Total AUM" value={loading ? '…' : '₹' + totalAUM.toLocaleString('en-IN')} />
+        <StatCard label="Total clients" value={dashLoading ? '…' : String(totals.acceptedCount + (totals.pendingReview + (statusCounts.needs_questionnaire ?? 0) + (statusCounts.needs_optimization ?? 0) + (statusCounts.awaiting_client ?? 0)))} />
+        <StatCard label="Amount invested" value={dashLoading ? '…' : '₹' + Math.round(totals.totalInvested).toLocaleString('en-IN')} />
         <StatCard
-          label={totalsLoading ? 'Total gain · loading' : totals.hasValuationData ? `Gain on ${totals.acceptedCount} accepted` : 'Total gain'}
-          value={totalsLoading ? '…' : gainValue}
+          label={dashLoading ? 'Total gain · loading' : totals.hasValuationData ? `Gain on ${totals.acceptedCount} invested` : 'Total gain'}
+          value={dashLoading ? '…' : gainValue}
           trend={gainTrend}
           positive={totals.totalGain >= 0}
         />
-        <StatCard label="Pending review" value={totalsLoading ? '…' : String(totals.pendingReview)} />
+        <StatCard label="Pending review" value={dashLoading ? '…' : String(totals.pendingReview)} />
       </div>
 
-      {totals.asOf && (
+      {totals.asOf && !dashLoading && (
         <p style={{ fontSize: 11, color: '#6D8196', marginBottom: '1rem' }}>
           Valuations as of {totals.asOf}. Prices are end-of-day snapshots from yfinance, not live quotes.
         </p>
       )}
-      {totalsError && (
-        <p style={{ fontSize: 12, color: '#F09595', marginBottom: '1rem' }}>Could not load valuations: {totalsError}</p>
+      {dashError && (
+        <p style={{ fontSize: 12, color: '#F09595', marginBottom: '1rem' }}>Could not load dashboard: {dashError}</p>
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 14, marginBottom: '1.5rem' }}>
-        <AUMByInvestorChart investors={investors} onOpen={onOpen} />
+        <AUMByInvestorChart investors={investorsFromOverview.length > 0 ? investorsFromOverview : investors} onOpen={onOpen} />
         <PortfolioPipelineChart statusCounts={statusCounts} />
       </div>
 
@@ -590,18 +589,18 @@ function DashboardView({ investors, loading, onOpen }: { investors: Investor[]; 
       }}>
         <p style={{ fontSize: 12, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>Recent clients</p>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
-          {investors.slice(0, 6).map(inv => (
+          {(investorsFromOverview.length > 0 ? investorsFromOverview : investors).slice(0, 6).map(inv => (
             <button key={inv.id} onClick={() => onOpen(inv.id)} style={{
               textAlign: 'left', cursor: 'pointer', border: '0.5px solid rgba(203,203,203,0.15)',
               background: 'rgba(255,255,227,0.04)', borderRadius: 10, padding: '12px 14px', color: '#FFFFE3',
             }}>
               <p style={{ fontSize: 13, fontWeight: 500 }}>{inv.name}</p>
               <p style={{ fontSize: 11, color: '#CBCBCB', marginTop: 3, textTransform: 'capitalize' }}>
-                {inv.risk_score ?? '—'} · {inv.investment_horizon ?? '—'}
+                {inv.risk_score ?? 'Questionnaire pending'} · {inv.investment_horizon ?? '—'}
               </p>
             </button>
           ))}
-          {investors.length === 0 && !loading && <p style={{ fontSize: 13, color: '#CBCBCB' }}>No investors yet.</p>}
+          {investorsFromOverview.length === 0 && !dashLoading && <p style={{ fontSize: 13, color: '#CBCBCB' }}>No investors yet.</p>}
         </div>
       </div>
     </div>
@@ -684,24 +683,24 @@ function InvestorDetail({
   onEditReview,
   onOpenProposal,
   onDeleted,
+  onRetakeQuestionnaire,
 }: {
   investor: Investor
   onEditReview: () => void
   onOpenProposal: () => void
   onDeleted: () => void
+  onRetakeQuestionnaire: () => void
 }) {
-  const [interactions, setInteractions] = useState<Interaction[]>([])
-  const [latestPortfolio, setLatestPortfolio] = useState<PortfolioResponse | null>(null)
-  const [valuation, setValuation] = useState<ValuationResponse | null>(null)
-  const [valError, setValError] = useState('')
+  // Single aggregated call: GET /investors/{id}/overview. Replaces the old
+  // dance of listPortfolios -> pick latest -> getValuation. Backend decides
+  // which portfolio is active vs pending, and whether a valuation exists.
+  const [overview, setOverview] = useState<InvestorOverview | null>(null)
+  const [overviewError, setOverviewError] = useState('')
+  const [overviewLoading, setOverviewLoading] = useState(true)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
 
   async function handleDelete() {
-    // The backend refuses (409) if any portfolios, assessments, interactions
-    // or audit rows exist for this investor — so the UI can't truthfully
-    // promise a cascade. The prompt reflects that: it's only usable for
-    // investors that have no history yet.
     const typed = window.prompt(
       `Delete investor "${investor.name}"?\n\n` +
       `The backend only allows deletion if the investor has no portfolios, ` +
@@ -722,33 +721,29 @@ function InvestorDetail({
   }
 
   useEffect(() => {
-    getInteractions(investor.id).then(setInteractions).catch(() => setInteractions([]))
-  }, [investor.id])
-
-  useEffect(() => {
     let cancelled = false
-    setLatestPortfolio(null)
-    setValuation(null)
-    setValError('')
-    listPortfolios(investor.id).then(list => {
-      if (cancelled) return
-      const sorted = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at))
-      const latest = sorted[0] ?? null
-      setLatestPortfolio(latest)
-      const accepted = sorted.find(p => p.status === 'accepted')
-      if (!accepted) return
-      getValuation(accepted.id)
-        .then(v => { if (!cancelled) setValuation(v) })
-        .catch(e => { if (!cancelled) setValError(e instanceof ApiError ? e.message : 'Could not load valuation.') })
-    }).catch(() => {})
+    setOverview(null)
+    setOverviewError('')
+    setOverviewLoading(true)
+    getInvestorOverview(investor.id)
+      .then(o => { if (!cancelled) setOverview(o) })
+      .catch(e => { if (!cancelled) setOverviewError(e instanceof ApiError ? e.message : 'Could not load investor overview.') })
+      .finally(() => { if (!cancelled) setOverviewLoading(false) })
     return () => { cancelled = true }
   }, [investor.id])
 
   const initials = investor.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
 
-  const allocationData = latestPortfolio ? ETFS.map(e => ({
+  // Allocation + valuation come from the overview. Active portfolio is the
+  // accepted one; pending portfolio is a newer proposal still waiting.
+  const active = overview?.active_portfolio ?? null
+  const pending = overview?.pending_portfolio ?? null
+  const valuation = overview?.valuation ?? null
+  const interactions = overview?.interactions ?? []
+
+  const allocationData = active ? ETFS.map(e => ({
     label: e.ticker,
-    percentage: toPercent(latestPortfolio.weights[e.ticker] ?? 0),
+    percentage: toPercent(active.weights[e.ticker] ?? 0),
     color: e.color,
   })) : null
 
@@ -765,11 +760,20 @@ function InvestorDetail({
           <div>
             <h1 style={{ fontSize: 22, fontWeight: 500, color: '#FFFFE3', marginBottom: 4 }}>{investor.name}</h1>
             <p style={{ fontSize: 13, color: '#CBCBCB', textTransform: 'capitalize' }}>
-              {investor.risk_score ?? '—'} · {investor.investment_horizon ?? '—'} horizon · Manager: {investor.assigned_manager_id ?? '—'}
+              {(overview?.risk_bucket ?? 'Questionnaire pending')} · {overview?.horizon ?? '—'} horizon · Manager: {investor.assigned_manager_id ?? '—'}
             </p>
+            {overview && (
+              <p style={{ fontSize: 11, color: '#6D8196', marginTop: 4 }}>
+                {overview.stage_label}
+              </p>
+            )}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button onClick={onRetakeQuestionnaire} style={{
+            padding: '8px 14px', fontSize: 12, borderRadius: 6, border: '1px solid rgba(203,203,203,0.3)',
+            background: 'transparent', color: '#FFFFE3', cursor: 'pointer',
+          }}>{overview?.assessment ? 'Retake questionnaire' : 'Take questionnaire'}</button>
           <button onClick={onEditReview} style={{
             padding: '8px 14px', fontSize: 12, borderRadius: 6, border: '1px solid rgba(203,203,203,0.3)',
             background: 'transparent', color: '#FFFFE3', cursor: 'pointer',
@@ -804,10 +808,21 @@ function InvestorDetail({
         </div>
       )}
 
+      {overviewError && (
+        <div style={{
+          background: 'rgba(240,149,149,0.08)',
+          border: '0.5px solid rgba(240,149,149,0.35)',
+          borderRadius: 10, padding: '10px 14px', marginBottom: '1rem',
+          fontSize: 13, color: '#F09595',
+        }}>
+          Overview: {overviewError}
+        </div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: '1.5rem' }}>
         <StatCard label="AUM" value={investor.total_aum ? '₹' + investor.total_aum.toLocaleString('en-IN') : '—'} />
         <StatCard
-          label={valuation ? 'Current value' : 'Current value · needs accepted portfolio'}
+          label={valuation ? 'Current value' : overviewLoading ? 'Current value' : 'Current value · needs accepted portfolio'}
           value={valuation ? '₹' + Math.round(valuation.current_value).toLocaleString('en-IN') : '—'}
         />
         <StatCard
@@ -816,28 +831,50 @@ function InvestorDetail({
           trend={valuation ? (valuation.gain_pct >= 0 ? '+' : '') + toPercent(valuation.gain_pct).toFixed(2) + '%' : undefined}
           positive={!!valuation && valuation.gain >= 0}
         />
-        <StatCard label="Horizon" value={investor.investment_horizon ?? '—'} />
+        <StatCard label="Horizon" value={overview?.horizon ?? '—'} />
       </div>
 
-      {(latestPortfolio || valuation) && (
+      {valuation && (
         <p style={{ fontSize: 11, color: '#6D8196', marginBottom: '1rem' }}>
-          {latestPortfolio && <>Latest portfolio snapshot: {localDate(latestPortfolio.created_at)} ({latestPortfolio.status})</>}
-          {valuation && latestPortfolio && ' · '}
-          {valuation && <>Valuation as of {valuation.as_of_date}</>}
-          {valuation?.hypothetical && ' · hypothetical (paper valuation; no trades placed)'}
+          Invested {valuation.start_date}, valued {valuation.as_of_date}
+          {typeof valuation.days_held === 'number' && <> ({valuation.days_held} days)</>}
+          {valuation.hypothetical && ' · hypothetical (paper valuation; no trades placed)'}
         </p>
       )}
-      {valError && <p style={{ fontSize: 12, color: '#F09595', marginBottom: '1rem' }}>{valError}</p>}
+      {overview?.valuation_note && (
+        <p style={{ fontSize: 12, color: '#EF9F27', marginBottom: '1rem' }}>{overview.valuation_note}</p>
+      )}
+
+      {pending && (
+        <div style={{
+          background: 'rgba(239,159,39,0.08)',
+          border: '0.5px solid rgba(239,159,39,0.35)',
+          borderRadius: 10, padding: '12px 14px', marginBottom: '1.5rem',
+        }}>
+          <p style={{ fontSize: 12, color: '#EF9F27', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4, fontWeight: 600 }}>
+            New proposal awaiting decision
+          </p>
+          <p style={{ fontSize: 13, color: '#FFFFE3' }}>
+            Portfolio {pending.id.slice(0, 8)}… · status <strong>{pending.status}</strong> · snapshot {localDate(pending.created_at)}
+          </p>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: '1.5rem' }}>
         <AUMSplitChart
           data={allocationData ?? undefined}
-          asOf={latestPortfolio ? localDate(latestPortfolio.created_at) : undefined}
+          asOf={active ? localDate(active.created_at) : undefined}
         />
         <HoldingDriftPanel valuation={valuation} />
       </div>
 
-      <InteractionList interactions={interactions} />
+      <InteractionList interactions={interactions.map(i => ({
+        id: i.id,
+        interaction_type: i.interaction_type ?? undefined,
+        notes: i.notes ?? undefined,
+        timestamp: i.timestamp ?? undefined,
+        manager_id: i.manager_id ?? undefined,
+      }))} />
 
       <div style={{ marginTop: '1.5rem' }}>
         <LogInteractionForm investorId={investor.id} />
@@ -960,6 +997,65 @@ function AllInteractionsView({ investors }: { investors: Investor[] }) {
 }
 
 // ── Empty ────────────────────────────────────────────────────────────────────
+
+// Thin wrapper around RiskQuestionnaire for the retake flow. Reuses the
+// full 10-question UI (meta-driven, backend-scored preview), then on
+// "Continue to review" POSTs to /investors/{id}/risk-assessments to persist
+// the new assessment — backend also bumps risk_score + investment_horizon
+// on the investor row. Returns the manager to the investor detail page.
+function RetakeQuestionnaireView({ investor, onDone }: { investor: Investor; onDone: () => void }) {
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [savedPreview, setSavedPreview] = useState<RiskScoreResponse | null>(null)
+
+  async function handleComplete(answers: Record<string, number>, preview: RiskScoreResponse) {
+    setSaving(true)
+    setSaveError('')
+    try {
+      await submitRiskAssessment(investor.id, { answers })
+      setSavedPreview(preview)
+    } catch (e) {
+      setSaveError(e instanceof ApiError ? e.message : 'Could not save the assessment.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (savedPreview) {
+    return (
+      <div style={{ padding: '3rem', maxWidth: 560 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 500, color: '#FFFFE3', marginBottom: 8 }}>
+          Assessment saved for {investor.name}
+        </h1>
+        <p style={{ fontSize: 13, color: '#CBCBCB', marginBottom: 16 }}>
+          New risk bucket: <strong>{savedPreview.bucket}</strong> · horizon: {savedPreview.horizon}
+        </p>
+        <button onClick={onDone} style={{
+          padding: '10px 18px', fontSize: 13, fontWeight: 600, borderRadius: 6, border: 'none',
+          background: '#FFFFE3', color: '#4A4A4A', cursor: 'pointer',
+        }}>
+          Back to {investor.name}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      {saveError && (
+        <div style={{ padding: '10px 20px', background: 'rgba(240,149,149,0.12)', color: '#F09595', fontSize: 13 }}>
+          {saveError}
+        </div>
+      )}
+      {saving && (
+        <div style={{ padding: '10px 20px', background: 'rgba(109,129,150,0.12)', color: '#a0b4c4', fontSize: 13 }}>
+          Saving assessment…
+        </div>
+      )}
+      <RiskQuestionnaire onComplete={handleComplete} />
+    </div>
+  )
+}
 
 function EmptyState({ message }: { message: string }) {
   return (

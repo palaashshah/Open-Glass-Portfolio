@@ -4,9 +4,10 @@ import { ETFS, aggregateByCategory } from '@/lib/etfs'
 import {
   ApiError, localDate, localTime, toPercent,
   listPortfolios, getPortfolio, getRationale, getDecisions, getValuation,
-  getDriftAlerts, getAuditLog, clientDecision,
+  getDriftAlerts, getAuditLog, clientDecision, getOverview,
   type PortfolioResponse, type RationaleResponse, type PortfolioDecisionResponse,
   type ValuationResponse, type AuditLogResponse,
+  type InvestorOverview, type InvestorStage,
 } from '@/lib/api'
 
 type Investor = {
@@ -19,68 +20,52 @@ type Investor = {
 }
 
 // ── Submission Queue ─────────────────────────────────────────────────────────
+// Driven entirely from GET /overview — the backend decides who's in the
+// queue (`in_queue`), labels each row (`stage_label`), and provides the
+// current stage which maps to the right primary action.
 
 type SubmissionQueueProps = {
+  // kept for API compat; the queue no longer needs the raw list
   investors: Investor[]
   onOpen: (id: string) => void
   onRunOptimization: (id: string) => void
 }
 
-type QueueStatus = 'no-portfolio' | 'proposed'
+// Shared fixed grid template so header cells and row cells align — the
+// previous `auto` last column let each row size its own actions differently.
+const QUEUE_GRID = '2fr 1.6fr 1fr 1fr 1fr 250px'
 
-export function SubmissionQueue({ investors, onOpen, onRunOptimization }: SubmissionQueueProps) {
-  const [rows, setRows] = useState<Array<Investor & { queueStatus: QueueStatus; portfolioId?: string }> | null>(null)
+export function SubmissionQueue({ onOpen, onRunOptimization }: SubmissionQueueProps) {
+  const [rows, setRows] = useState<InvestorOverview[] | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    if (investors.length === 0) { setRows([]); return }
     let cancelled = false
-    ;(async () => {
-      try {
-        // Per PRD 5.2: the queue is investors needing manager action — either
-        // they have no portfolio yet (awaiting optimization) or their latest
-        // portfolio is still "proposed" (awaiting decision). Everything else
-        // (approved / accepted / rejected / declined / superseded) is not
-        // actionable in this screen.
-        const lists = await Promise.all(
-          investors.map(inv => listPortfolios(inv.id).catch(() => [] as PortfolioResponse[]))
-        )
-        if (cancelled) return
-        const next: Array<Investor & { queueStatus: QueueStatus; portfolioId?: string }> = []
-        investors.forEach((inv, i) => {
-          const sorted = [...lists[i]].sort((a, b) => b.created_at.localeCompare(a.created_at))
-          const latest = sorted[0]
-          if (!latest) {
-            next.push({ ...inv, queueStatus: 'no-portfolio' })
-          } else if (latest.status === 'proposed') {
-            next.push({ ...inv, queueStatus: 'proposed', portfolioId: latest.id })
-          }
-        })
-        setRows(next)
-      } catch (e) {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the submission queue.')
-      }
-    })()
+    getOverview()
+      .then(o => { if (!cancelled) setRows(o.investors.filter(x => x.in_queue)) })
+      .catch(e => { if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the submission queue.') })
     return () => { cancelled = true }
-  }, [investors])
+  }, [])
 
   return (
     <div style={{ padding: '2rem', maxWidth: 1100 }}>
       <h1 style={h1}>Submission Queue</h1>
       <p style={muted}>
-        Investors that need the manager&apos;s attention — awaiting the first optimizer run, or sitting on a proposed portfolio.
+        Investors that need the manager&apos;s attention — stage comes from the backend.
       </p>
 
       {error && <ErrorView title="Submission queue" error={error} />}
 
       <div style={{ ...panel, padding: 0, marginTop: '1rem' }}>
         <div style={{
-          display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto',
+          display: 'grid', gridTemplateColumns: QUEUE_GRID, alignItems: 'center',
           padding: '10px 16px', gap: 12,
           borderBottom: '0.5px solid rgba(203,203,203,0.15)',
           fontSize: 11, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.08em',
         }}>
-          <span>Investor</span><span>Status</span><span>Risk</span><span>Horizon</span><span>AUM</span><span />
+          <span>Investor</span><span>Status</span><span>Risk</span><span>Horizon</span>
+          <span style={{ textAlign: 'right' }}>AUM</span>
+          <span />
         </div>
 
         {rows === null && !error && (
@@ -90,41 +75,67 @@ export function SubmissionQueue({ investors, onOpen, onRunOptimization }: Submis
           <p style={{ padding: '1.5rem', fontSize: 13, color: '#CBCBCB' }}>Nothing pending — every investor already has a decided portfolio.</p>
         )}
 
-        {rows?.map(inv => (
-          <div key={inv.id} style={{
-            display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto',
-            padding: '12px 16px', gap: 12, alignItems: 'center',
-            borderBottom: '0.5px solid rgba(203,203,203,0.08)',
-            fontSize: 13, color: '#FFFFE3',
-          }}>
-            <span onClick={() => onOpen(inv.id)} style={{ cursor: 'pointer' }}>{inv.name}</span>
-            <QueueStatusChip status={inv.queueStatus} />
-            <span style={{ color: '#a0b4c4', textTransform: 'capitalize' }}>{inv.risk_score ?? '—'}</span>
-            <span style={{ color: '#CBCBCB', textTransform: 'capitalize' }}>{inv.investment_horizon ?? '—'}</span>
-            <span style={mono}>{inv.total_aum ? '₹' + inv.total_aum.toLocaleString('en-IN') : '—'}</span>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button onClick={() => onOpen(inv.id)} style={btnGhost}>Open</button>
-              <button onClick={() => onRunOptimization(inv.id)} style={btnPrimary}>
-                {inv.queueStatus === 'no-portfolio' ? 'Run optimization' : 'Review'}
-              </button>
+        {rows?.map(row => {
+          const inv = row.investor
+          const action = actionForStage(row.stage)
+          return (
+            <div key={inv.id} style={{
+              display: 'grid', gridTemplateColumns: QUEUE_GRID, alignItems: 'center',
+              padding: '12px 16px', gap: 12,
+              borderBottom: '0.5px solid rgba(203,203,203,0.08)',
+              fontSize: 13, color: '#FFFFE3',
+            }}>
+              <span onClick={() => onOpen(inv.id)} style={{ cursor: 'pointer' }}>{inv.name}</span>
+              <QueueStatusChip label={row.stage_label} stage={row.stage} />
+              <span style={{ color: '#a0b4c4', textTransform: 'capitalize' }}>{row.risk_bucket ?? '—'}</span>
+              <span style={{ color: '#CBCBCB', textTransform: 'capitalize' }}>{row.horizon ?? '—'}</span>
+              <span style={{ ...mono, textAlign: 'right' }}>{inv.total_aum ? '₹' + inv.total_aum.toLocaleString('en-IN') : '—'}</span>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button onClick={() => onOpen(inv.id)} style={btnGhost}>Open</button>
+                {action && (
+                  <button onClick={() => onRunOptimization(inv.id)} style={btnPrimary}>
+                    {action}
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
 }
 
-function QueueStatusChip({ status }: { status: QueueStatus }) {
-  const config = status === 'no-portfolio'
-    ? { label: 'Awaiting optimizer', color: '#a0b4c4' }
-    : { label: 'Proposed · awaiting decision', color: '#EF9F27' }
+// Map backend stage → primary CTA label. "Run optimization" is only shown for
+// `needs_optimization` — the backend 422s if you try it on needs_questionnaire.
+function actionForStage(stage: InvestorStage): string | null {
+  switch (stage) {
+    case 'needs_questionnaire': return null  // backend refuses; direct the user to open the investor and take the questionnaire
+    case 'needs_optimization':  return 'Run optimization'
+    case 'awaiting_manager':    return 'Review'
+    case 'awaiting_client':     return 'Open'
+    case 'invested':            return null
+  }
+}
+
+function QueueStatusChip({ label, stage }: { label: string; stage: InvestorStage }) {
+  const colorForStage: Record<InvestorStage, string> = {
+    needs_questionnaire: '#a0b4c4',
+    needs_optimization:  '#a0b4c4',
+    awaiting_manager:    '#EF9F27',
+    awaiting_client:     '#5DCAA5',
+    invested:            '#97C459',
+  }
+  const color = colorForStage[stage] ?? '#CBCBCB'
   return (
     <span style={{
       fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
-      padding: '3px 8px', borderRadius: 4,
-      background: `${config.color}22`, color: config.color,
-    }}>{config.label}</span>
+      padding: '4px 10px', borderRadius: 4,
+      background: `${color}22`, color,
+      whiteSpace: 'nowrap',
+      width: 'fit-content',
+      fontWeight: 600,
+    }}>{label}</span>
   )
 }
 
@@ -147,6 +158,13 @@ function useLatestPortfolio(investorId: string | undefined, filter?: (p: Portfol
   const [error, setError] = useState('')
   const [tick, setTick] = useState(0)
 
+  // Callers pass inline arrow functions for `filter`. A new function identity
+  // on every render was re-triggering the effect → fetch restart → setState
+  // → re-render → infinite loading. Stash the current filter in a ref and
+  // keep the effect dependent only on investorId + tick.
+  const filterRef = useRef(filter)
+  filterRef.current = filter
+
   useEffect(() => {
     if (!investorId) return
     let cancelled = false
@@ -155,7 +173,8 @@ function useLatestPortfolio(investorId: string | undefined, filter?: (p: Portfol
     listPortfolios(investorId)
       .then(list => {
         if (cancelled) return
-        const candidates = filter ? list.filter(filter) : list
+        const f = filterRef.current
+        const candidates = f ? list.filter(f) : list
         if (candidates.length === 0) {
           setPortfolio(null)
           setState('none')
@@ -171,7 +190,7 @@ function useLatestPortfolio(investorId: string | undefined, filter?: (p: Portfol
         setState('error')
       })
     return () => { cancelled = true }
-  }, [investorId, filter, tick])
+  }, [investorId, tick])
 
   return { state, portfolio, error, refresh: () => setTick(t => t + 1) }
 }

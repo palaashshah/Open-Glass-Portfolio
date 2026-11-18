@@ -439,30 +439,44 @@ export default function InvestorOnboarding() {
     )
 
     // ── STEP 6 — Success ─────────────────────────────────────────────────────
-    return screen(
-        <div style={{ textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: "16px" }}>
+    // Fully centered success screen — bypasses the shared screen() wrapper
+    // because that pins content top-left. Fills the viewport, centers both
+    // axes, keeps the content block narrow for readability.
+    return (
+        <div style={{
+            width: "100%", minHeight: "100vh", flex: 1,
+            backgroundColor: "var(--charcoal)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: "48px 24px",
+        }}>
             <div style={{
-                width: "60px", height: "60px", borderRadius: "50%",
-                border: "2px solid var(--ivory)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: "24px", color: "var(--ivory)", marginBottom: "8px"
-            }}>✓</div>
-
-            <h1 style={{
-                fontFamily: "var(--font-heading)", fontSize: "28px",
-                color: "var(--ivory)", fontWeight: 700
-            }}>Profile created</h1>
-
-            <p style={{
-                fontFamily: "var(--font-body)", fontSize: "15px",
-                color: "rgba(255,255,255,0.5)", maxWidth: "360px", lineHeight: 1.7
+                textAlign: "center",
+                display: "flex", flexDirection: "column", alignItems: "center", gap: "16px",
+                maxWidth: "420px",
             }}>
-                Welcome, {name}. Your risk profile is{" "}
-                <span style={{ fontFamily: "var(--font-mono)", color: "var(--ivory)", fontWeight: 600 }}>
-                    {riskPreview ? riskPreview.bucket.toUpperCase() : '—'}
-                </span>
-                . A manager will be in touch shortly.
-            </p>
+                <div style={{
+                    width: "60px", height: "60px", borderRadius: "50%",
+                    border: "2px solid var(--ivory)",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: "24px", color: "var(--ivory)", marginBottom: "8px",
+                }}>✓</div>
+
+                <h1 style={{
+                    fontFamily: "var(--font-heading)", fontSize: "28px",
+                    color: "var(--ivory)", fontWeight: 700,
+                }}>Profile created</h1>
+
+                <p style={{
+                    fontFamily: "var(--font-body)", fontSize: "15px",
+                    color: "rgba(255,255,255,0.5)", maxWidth: "360px", lineHeight: 1.7,
+                }}>
+                    Welcome, {name}. Your risk profile is{" "}
+                    <span style={{ fontFamily: "var(--font-mono)", color: "var(--ivory)", fontWeight: 600 }}>
+                        {riskPreview ? riskPreview.bucket.toUpperCase() : '—'}
+                    </span>
+                    . A manager will be in touch shortly.
+                </p>
+            </div>
         </div>
     )
 }

@@ -310,7 +310,50 @@ export interface ValuationResponse {
     drift_threshold: number
     rebalancing_suggested: boolean
     cash_rate?: number | null
+    days_held?: number              // added backend-side; number of days between start_date and as_of_date
     holdings: HoldingValuationResponse[]
+}
+
+// ---------- /overview + /investors/{id}/overview ----------
+// New aggregating endpoints the backend added. Prefer these over fanning out
+// listPortfolios()+getValuation() per investor in the UI.
+
+export type InvestorStage =
+    | 'needs_questionnaire'
+    | 'needs_optimization'
+    | 'awaiting_manager'
+    | 'awaiting_client'
+    | 'invested'
+
+export interface OverviewTotals {
+    clients: number
+    invested_clients: number
+    amount_invested: number
+    current_value: number
+    gain: number
+    gain_pct: number                // decimal 0–1
+    as_of_date: string              // ISO date
+    stage_counts: Partial<Record<InvestorStage, number>>
+}
+
+export interface InvestorOverview {
+    investor: InvestorResponse
+    risk_bucket: string | null      // authoritative bucket (null if no assessment)
+    horizon: string | null          // authoritative horizon (null if no assessment)
+    assessment: RiskAssessmentResponse | null
+    stage: InvestorStage
+    stage_label: string             // human-readable, from the backend
+    in_queue: boolean               // true when the manager should act on this investor
+    active_portfolio: PortfolioResponse | null   // accepted portfolio, if any
+    pending_portfolio: PortfolioResponse | null  // newer proposal still awaiting a decision
+    valuation: ValuationResponse | null          // valuation of active_portfolio
+    valuation_note: string | null
+    interactions?: InteractionResponse[]         // only on the single-investor call
+}
+
+export interface OverviewResponse {
+    totals: OverviewTotals
+    investors: InvestorOverview[]
 }
 
 export interface AuditLogResponse {
@@ -398,6 +441,11 @@ export function getValuation(id: string, investedOn?: string) {
     const q = investedOn ? `?invested_on=${encodeURIComponent(investedOn)}` : ''
     return request<ValuationResponse>(`/portfolios/${id}/valuation${q}`)
 }
+
+// overview — aggregating endpoints
+export const getOverview = () => request<OverviewResponse>('/overview')
+export const getInvestorOverview = (id: string) =>
+    request<InvestorOverview>(`/investors/${id}/overview`)
 
 // drift + audit
 export const getDriftAlerts = () => request<ValuationResponse[]>('/drift-alerts')
