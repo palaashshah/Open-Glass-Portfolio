@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import AuditLog, Investor, Portfolio, PortfolioDecision
+from audit_trail import record_audit
 from schemas import (
     ClientDecisionRequest,
     ManagerDecisionRequest,
@@ -109,6 +110,17 @@ def client_decision(portfolio_id: str, body: ClientDecisionRequest, db: Session 
         )
         for old in earlier:
             change_status(db, old, "superseded", body.recorded_by, f"Replaced by portfolio {portfolio.id}")
+        
+        # Assets under management are what the client has actually invested.
+        # Until now the profile only held the figure given at intake, so when
+        # the accepted amount differs, the profile is brought in line with it.
+        # Every screen that shows AUM then agrees with the valuation.
+        if investor.total_aum is None or float(investor.total_aum) != float(amount):
+            record_audit(db, body.recorded_by, "investor.aum_updated", "investor", investor.id,
+                         reason=f"Set to the amount accepted for portfolio {portfolio.id}",
+                         before={"total_aum": float(investor.total_aum) if investor.total_aum is not None else None},
+                         after={"total_aum": float(amount)})
+            investor.total_aum = amount
 
     add_decision(db, portfolio, "client", body.decision, body.notes, body.recorded_by, amount)
     change_status(db, portfolio, body.decision, body.recorded_by, body.notes)
