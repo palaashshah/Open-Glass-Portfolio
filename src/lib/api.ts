@@ -290,7 +290,10 @@ export interface HoldingValuationResponse {
     target_weight: number
     start_price: number
     latest_price: number
-    value: number
+    invested: number          // rupees put into this holding
+    value: number             // what that is worth now
+    gain: number              // value minus invested (negative for a loss)
+    gain_pct: number          // decimal fraction
     current_weight: number
     drift: number
     breached: boolean

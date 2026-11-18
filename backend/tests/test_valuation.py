@@ -59,3 +59,15 @@ def test_rebalancing_trades_restore_the_approved_weights():
 def test_reports_the_days_between_investment_and_valuation():
     v = value_portfolio({"A": 1.0}, 100.0, prices(), date(2026, 1, 1))
     assert (v.start_date, v.as_of_date, v.days_held) == (date(2026, 1, 1), date(2026, 1, 5), 4)
+
+def test_each_holding_reports_what_went_in_and_what_it_is_worth():
+    v = value_portfolio({"A": 0.6, "B": 0.4}, 1000.0, prices(), date(2026, 1, 1))
+    by_ticker = {h.ticker: h for h in v.holdings}
+    assert by_ticker["A"].invested == pytest.approx(600.0)
+    assert by_ticker["B"].invested == pytest.approx(400.0)
+    for h in v.holdings:
+        assert h.gain == pytest.approx(h.value - h.invested)
+        assert h.gain_pct == pytest.approx(h.latest_price / h.start_price - 1)
+    # the parts add up to the whole
+    assert sum(h.invested for h in v.holdings) == pytest.approx(v.amount)
+    assert sum(h.gain for h in v.holdings) == pytest.approx(v.gain)

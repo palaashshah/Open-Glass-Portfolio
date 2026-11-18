@@ -21,6 +21,7 @@ import {
   AuditLog,
   InvestorPortalView,
   ClientSignOffPanel,
+  HoldingsPerformance,
 } from '@/components/manager/ManagerViews'
 
 import StatCard from '@/components/dashboard/StatCard'
@@ -888,6 +889,12 @@ function InvestorDetail({
         />
         <HoldingDriftPanel valuation={valuation} />
       </div>
+      
+      {valuation && (
+        <div style={{ marginBottom: '1.5rem' }}>
+          <HoldingsPerformance valuation={valuation} />
+        </div>
+      )}
 
       {/* key: a different portfolio gets a fresh panel, so old trades never linger */}
       {active && valuation && <RebalancingPanel key={active.id} portfolioId={active.id} />}

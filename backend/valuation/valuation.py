@@ -27,7 +27,10 @@ class Holding:
     target_weight: float     # the approved weight
     start_price: float
     latest_price: float
-    value: float
+    invested: float          # rupees put into this holding: amount x approved weight
+    value: float             # what that is worth now
+    gain: float              # value minus invested (negative for a loss)
+    gain_pct: float          # gain as a fraction of invested
     current_weight: float
     drift: float             # current weight minus approved weight
     breached: bool           # drift beyond the threshold
@@ -82,10 +85,13 @@ def value_portfolio(weights: dict, amount: float, prices: pd.DataFrame,
     for ticker, target in held.items():
         current = values[ticker] / total
         drift = current - target
+        invested = amount * target
         holdings.append(Holding(
             ticker=ticker, target_weight=target,
             start_price=float(start[ticker]), latest_price=float(latest[ticker]),
-            value=values[ticker], current_weight=current, drift=drift,
+            invested=invested, value=values[ticker],
+            gain=values[ticker] - invested, gain_pct=growth[ticker] - 1,
+            current_weight=current, drift=drift,
             breached=abs(drift) > threshold, basis=basis[ticker]))
     holdings.sort(key=lambda h: (-h.value, h.ticker))
 

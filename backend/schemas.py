@@ -190,7 +190,10 @@ class HoldingValuationResponse(BaseModel):
     target_weight: float
     start_price: float
     latest_price: float
-    value: float
+    invested: float             # rupees put into this holding
+    value: float                # what that is worth now
+    gain: float                 # value minus invested
+    gain_pct: float             # a fraction
     current_weight: float
     drift: float
     breached: bool

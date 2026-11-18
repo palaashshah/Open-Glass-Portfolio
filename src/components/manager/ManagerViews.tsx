@@ -620,6 +620,71 @@ export function AuditLog({ investors }: { investors: Investor[] }) {
   )
 }
 
+// ── Holdings performance ────────────────────────────────────────────────────
+// What each holding has done since the money went in: rupees invested, what
+// they are worth now, and the gain or loss. An allocation alone says where the
+// money is; this says which fund helped and which one hurt. Every number comes
+// from the backend's valuation, and the rows add up to the total.
+export function HoldingsPerformance({ valuation }: { valuation: ValuationResponse }) {
+  const nameOf = (ticker: string) => ETFS.find(e => e.ticker === ticker)?.label ?? ''
+  const rupees = (n: number) => '₹' + Math.round(n).toLocaleString('en-IN')
+  const signedRupees = (n: number) => (Math.round(n) >= 0 ? '+' : '−') + '₹' + Math.abs(Math.round(n)).toLocaleString('en-IN')
+  const signedPct = (f: number) => (f >= 0 ? '+' : '−') + Math.abs(toPercent(f)).toFixed(2) + '%'
+  const tone = (n: number) => (Math.round(n) === 0 ? '#CBCBCB' : n > 0 ? '#97C459' : '#F09595')
+
+  const best = [...valuation.holdings].sort((a, b) => b.gain - a.gain)[0]
+  const worst = [...valuation.holdings].sort((a, b) => a.gain - b.gain)[0]
+  const row = {
+    display: 'grid', gridTemplateColumns: '1.7fr 0.7fr 1fr 1fr 1fr 0.8fr',
+    gap: 8, alignItems: 'center', fontSize: 12,
+    padding: '6px 0', borderBottom: '0.5px solid rgba(203,203,203,0.08)',
+  } as const
+  const right = { textAlign: 'right', ...mono } as const
+
+  return (
+    <div style={{ ...panel, marginBottom: 12 }}>
+      <p style={panelTitle}>
+        Holdings · {localDate(valuation.start_date)} to {localDate(valuation.as_of_date)} ({valuation.days_held} days)
+      </p>
+      <div style={{ ...row, color: '#CBCBCB', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+        <span>Holding</span>
+        <span style={{ textAlign: 'right' }}>Weight</span>
+        <span style={{ textAlign: 'right' }}>Invested</span>
+        <span style={{ textAlign: 'right' }}>Worth now</span>
+        <span style={{ textAlign: 'right' }}>Gain / loss</span>
+        <span style={{ textAlign: 'right' }}>Return</span>
+      </div>
+      {valuation.holdings.map(h => (
+        <div key={h.ticker} style={row}>
+          <span>
+            <span style={{ ...mono, color: '#a0b4c4' }}>{h.ticker}</span>
+            <span style={{ color: '#CBCBCB' }}> · {nameOf(h.ticker)}{h.basis === 'accrual' ? ' (interest accrued)' : ''}</span>
+          </span>
+          <span style={{ ...right, color: '#CBCBCB' }}>{toPercent(h.target_weight).toFixed(1)}%</span>
+          <span style={{ ...right, color: '#CBCBCB' }}>{rupees(h.invested)}</span>
+          <span style={{ ...right, color: '#FFFFE3' }}>{rupees(h.value)}</span>
+          <span style={{ ...right, color: tone(h.gain) }}>{signedRupees(h.gain)}</span>
+          <span style={{ ...right, color: tone(h.gain) }}>{signedPct(h.gain_pct)}</span>
+        </div>
+      ))}
+      <div style={{ ...row, borderBottom: 'none', fontWeight: 600 }}>
+        <span style={{ color: '#FFFFE3' }}>Total</span>
+        <span style={{ ...right, color: '#CBCBCB' }}>100.0%</span>
+        <span style={{ ...right, color: '#CBCBCB' }}>{rupees(valuation.amount)}</span>
+        <span style={{ ...right, color: '#FFFFE3' }}>{rupees(valuation.current_value)}</span>
+        <span style={{ ...right, color: tone(valuation.gain) }}>{signedRupees(valuation.gain)}</span>
+        <span style={{ ...right, color: tone(valuation.gain) }}>{signedPct(valuation.gain_pct)}</span>
+      </div>
+      {best && worst && Math.round(best.gain) !== Math.round(worst.gain) && (
+        <p style={{ fontSize: 12, color: '#CBCBCB', marginTop: 10, lineHeight: 1.6 }}>
+          {Math.round(best.gain) > 0 && <>Largest gain: {nameOf(best.ticker) || best.ticker} ({signedRupees(best.gain)}). </>}
+          {Math.round(worst.gain) < 0 && <>Largest loss: {nameOf(worst.ticker) || worst.ticker} ({signedRupees(worst.gain)}).</>}
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ── Investor Portal (accepted-only) ──────────────────────────────────────────
 
 // Investor portal is "accepted only" per the spec: show the portfolio the
@@ -690,7 +755,7 @@ export function InvestorPortalView({ investor }: { investor?: Investor | null })
           )}
         </div>
       )}
-      {valuationError && <ErrorView title="Valuation" error={valuationError} />}
+      {valuation && <HoldingsPerformance valuation={valuation} />}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
         <div style={panel}>
