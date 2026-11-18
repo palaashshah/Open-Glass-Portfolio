@@ -253,17 +253,26 @@ type DashboardTotals = {
   hasValuationData: boolean
 }
 
-function useDashboardTotals(investors: Investor[]): { totals: DashboardTotals; loading: boolean; error: string } {
+type DashboardData = {
+  totals: DashboardTotals
+  statusCounts: Record<string, number>   // keyed by latest-portfolio status
+  loading: boolean
+  error: string
+}
+
+function useDashboardData(investors: Investor[]): DashboardData {
   const [totals, setTotals] = useState<DashboardTotals>({
     totalInvested: 0, totalCurrentValue: 0, totalGain: 0, gainPct: 0,
     pendingReview: 0, acceptedCount: 0, asOf: null, hasValuationData: false,
   })
+  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     if (investors.length === 0) {
       setTotals(t => ({ ...t, totalInvested: 0, totalCurrentValue: 0, totalGain: 0, gainPct: 0, pendingReview: 0, acceptedCount: 0, hasValuationData: false }))
+      setStatusCounts({})
       return
     }
     let cancelled = false
@@ -272,22 +281,21 @@ function useDashboardTotals(investors: Investor[]): { totals: DashboardTotals; l
 
     ;(async () => {
       try {
-        // Parallel: latest portfolios for every investor
         const portfolioLists = await Promise.all(investors.map(inv => listPortfolios(inv.id).catch(() => [] as PortfolioResponse[])))
         let pendingReview = 0
         let acceptedCount = 0
         const acceptedPortfolios: PortfolioResponse[] = []
+        const counts: Record<string, number> = {}
         for (const list of portfolioLists) {
-          // newest first
           const sorted = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at))
           const latest = sorted[0]
           if (!latest) continue
+          counts[latest.status] = (counts[latest.status] ?? 0) + 1
           if (latest.status === 'proposed') pendingReview += 1
           const accepted = sorted.find(p => p.status === 'accepted')
           if (accepted) { acceptedCount += 1; acceptedPortfolios.push(accepted) }
         }
 
-        // Valuations for every accepted portfolio
         const valuations = await Promise.all(
           acceptedPortfolios.map(p => getValuation(p.id).catch(() => null as ValuationResponse | null))
         )
@@ -308,6 +316,7 @@ function useDashboardTotals(investors: Investor[]): { totals: DashboardTotals; l
             pendingReview, acceptedCount, asOf: latestAsOf,
             hasValuationData: valuations.some(v => v !== null),
           })
+          setStatusCounts(counts)
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load valuations.')
@@ -319,12 +328,109 @@ function useDashboardTotals(investors: Investor[]): { totals: DashboardTotals; l
     return () => { cancelled = true }
   }, [investors])
 
-  return { totals, loading, error }
+  return { totals, statusCounts, loading, error }
 }
+
+// ── charts ───────────────────────────────────────────────────────────────────
+
+function AUMByInvestorChart({ investors, onOpen }: { investors: Investor[]; onOpen: (id: string) => void }) {
+  const sorted = useMemo(
+    () => [...investors].filter(i => (i.total_aum ?? 0) > 0).sort((a, b) => (b.total_aum ?? 0) - (a.total_aum ?? 0)).slice(0, 8),
+    [investors]
+  )
+  const max = sorted.length > 0 ? (sorted[0].total_aum ?? 0) : 1
+
+  return (
+    <div style={chartPanel}>
+      <p style={chartTitle}>AUM by investor <span style={chartSubtle}>· top 8</span></p>
+      {sorted.length === 0 ? (
+        <p style={{ fontSize: 12, color: '#CBCBCB' }}>No AUM recorded yet.</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {sorted.map(inv => {
+            const aum = inv.total_aum ?? 0
+            const pct = (aum / max) * 100
+            return (
+              <button
+                key={inv.id}
+                onClick={() => onOpen(inv.id)}
+                style={{
+                  background: 'transparent', border: 'none', textAlign: 'left',
+                  padding: 0, cursor: 'pointer', width: '100%',
+                }}
+                title={`Open ${inv.name}`}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
+                  <span style={{ color: '#FFFFE3' }}>{inv.name}</span>
+                  <span style={{ fontFamily: 'monospace', color: '#CBCBCB' }}>₹{aum.toLocaleString('en-IN')}</span>
+                </div>
+                <div style={{ height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: pct + '%', background: '#6D8196', transition: 'width 0.4s ease' }} />
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PortfolioPipelineChart({ statusCounts }: { statusCounts: Record<string, number> }) {
+  // Order statuses left→right by workflow stage; show every one that has >0.
+  const order: Array<{ key: string; label: string; color: string }> = [
+    { key: 'proposed',   label: 'Proposed',   color: '#EF9F27' },
+    { key: 'approved',   label: 'Approved',   color: '#97C459' },
+    { key: 'accepted',   label: 'Accepted',   color: '#5DCAA5' },
+    { key: 'rejected',   label: 'Rejected',   color: '#F09595' },
+    { key: 'declined',   label: 'Declined',   color: '#c08080' },
+    { key: 'superseded', label: 'Superseded', color: '#8497b5' },
+  ]
+  const present = order.filter(s => (statusCounts[s.key] ?? 0) > 0)
+  const total = present.reduce((s, x) => s + (statusCounts[x.key] ?? 0), 0)
+
+  return (
+    <div style={chartPanel}>
+      <p style={chartTitle}>Portfolio pipeline <span style={chartSubtle}>· latest portfolio per investor</span></p>
+      {total === 0 ? (
+        <p style={{ fontSize: 12, color: '#CBCBCB' }}>No portfolios yet.</p>
+      ) : (
+        <>
+          <div style={{ display: 'flex', height: 14, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,0.08)' }}>
+            {present.map(s => {
+              const n = statusCounts[s.key] ?? 0
+              const pct = (n / total) * 100
+              return <div key={s.key} title={`${s.label}: ${n}`} style={{ width: pct + '%', background: s.color }} />
+            })}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
+            {present.map(s => (
+              <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#CBCBCB' }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: s.color }} />
+                <span>{s.label}</span>
+                <span style={{ fontFamily: 'monospace', color: '#FFFFE3' }}>{statusCounts[s.key]}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+const chartPanel = {
+  background: 'rgba(255,255,227,0.06)',
+  border: '0.5px solid rgba(203,203,203,0.15)',
+  borderRadius: 12, padding: '1.25rem',
+} as const
+const chartTitle = {
+  fontSize: 12, color: '#CBCBCB', textTransform: 'uppercase' as const, letterSpacing: '0.06em', marginBottom: 12,
+}
+const chartSubtle = { color: '#6D8196', fontSize: 10, textTransform: 'none' as const, letterSpacing: 0 }
 
 function DashboardView({ investors, loading, onOpen }: { investors: Investor[]; loading: boolean; onOpen: (id: string) => void }) {
   const totalAUM = investors.reduce((s, i) => s + (i.total_aum ?? 0), 0)
-  const { totals, loading: totalsLoading, error: totalsError } = useDashboardTotals(investors)
+  const { totals, statusCounts, loading: totalsLoading, error: totalsError } = useDashboardData(investors)
 
   const gainValue = totals.hasValuationData
     ? (totals.totalGain >= 0 ? '+' : '') + '₹' + Math.round(totals.totalGain).toLocaleString('en-IN')
@@ -357,6 +463,11 @@ function DashboardView({ investors, loading, onOpen }: { investors: Investor[]; 
       {totalsError && (
         <p style={{ fontSize: 12, color: '#F09595', marginBottom: '1rem' }}>Could not load valuations: {totalsError}</p>
       )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 14, marginBottom: '1.5rem' }}>
+        <AUMByInvestorChart investors={investors} onOpen={onOpen} />
+        <PortfolioPipelineChart statusCounts={statusCounts} />
+      </div>
 
       <div style={{
         background: 'rgba(255,255,227,0.06)',
