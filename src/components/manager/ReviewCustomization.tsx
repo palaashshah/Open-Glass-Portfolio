@@ -252,8 +252,11 @@ export default function ReviewCustomization({
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <StatusBadge status={portfolio.status} />
-          <button onClick={runOptimize} disabled={running || decided} style={btnGhost}>
-            {running ? 'Running…' : 'Re-run optimizer'}
+          {/* Stays enabled after a decision. Once a proposal is rejected, declined
+              or accepted, running the optimizer again is the only way to get a
+              new proposal; disabling it left the investor stuck. */}
+          <button onClick={runOptimize} disabled={running} style={btnGhost}>
+            {running ? 'Running…' : decided ? 'Run new optimization' : 'Re-run optimizer'}
           </button>
         </div>
       </div>
@@ -388,6 +391,7 @@ export default function ReviewCustomization({
             {decided ? (
               <p style={{ fontSize: 13, color: '#CBCBCB' }}>
                 Status <strong style={{ color: '#FFFFE3' }}>{portfolio.status}</strong> — no further decision can be recorded on this proposal.
+                Use &quot;Run new optimization&quot; above to create a new proposal.
               </p>
             ) : (
               <>

@@ -4,9 +4,10 @@ import { createInteraction, ApiError } from '@/lib/api'
 
 type LogInteractionFormProps = {
   investorId: string
+  onLogged?: () => void   // called after an interaction is saved, so the page can reload its list
 }
 
-export default function LogInteractionForm({ investorId }: LogInteractionFormProps) {
+export default function LogInteractionForm({ investorId, onLogged }: LogInteractionFormProps) {
     const [interactiontype, setInteractiontype] = useState('')
     const [notes, setNotes] = useState('')
     const [isLoading, setIsLoading] = useState(false)
@@ -25,6 +26,7 @@ export default function LogInteractionForm({ investorId }: LogInteractionFormPro
             })
             setInteractiontype('')
             setNotes('')
+            onLogged?.()
         } catch (e) {
             setError(e instanceof ApiError ? e.message : 'Could not log the interaction.')
         } finally {

@@ -292,9 +292,13 @@ type ProposalReportProps = {
   investorName?: string
 }
 
+// A proposal is for the client, so it exists only once the manager has
+// approved the portfolio (PRD 5.9): approved, or already accepted.
+const proposalFilter = (p: PortfolioResponse) => p.status === 'approved' || p.status === 'accepted'
+
 export function ProposalReport({ investorId, investorName }: ProposalReportProps) {
   const printRef = useRef<HTMLDivElement>(null)
-  const { state, portfolio, error } = useLatestPortfolio(investorId)
+  const { state, portfolio, error } = useLatestPortfolio(investorId, proposalFilter)
   const [rationale, setRationale] = useState<RationaleResponse | null>(null)
   const [decisions, setDecisions] = useState<PortfolioDecisionResponse[]>([])
   const [auxError, setAuxError] = useState('')
@@ -333,7 +337,7 @@ export function ProposalReport({ investorId, investorName }: ProposalReportProps
   if (!investorId) return <Empty>Select an investor to prepare a proposal.</Empty>
   if (state === 'loading' || state === 'idle') return <Empty>Loading…</Empty>
   if (state === 'error') return <ErrorView title="Proposal" error={error} />
-  if (state === 'none' || !portfolio) return <Empty>No portfolio for {investorName ?? 'this investor'} yet.</Empty>
+  if (state === 'none' || !portfolio) return <Empty>No approved portfolio for {investorName ?? 'this investor'} yet. A proposal can be prepared once the manager approves one.</Empty>
 
   return (
     <div style={{ padding: '2rem', maxWidth: 900 }}>

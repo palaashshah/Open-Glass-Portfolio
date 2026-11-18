@@ -3,9 +3,10 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   ApiError, localTime, localDate, toPercent,
   getInvestors, getInteractions, getAllInteractions,
-  getOverview, getInvestorOverview, submitRiskAssessment, deleteInvestor,
+  getOverview, getInvestorOverview, getRebalancing, submitRiskAssessment, deleteInvestor,
   type InvestorResponse, type PortfolioResponse, type ValuationResponse,
   type InvestorOverview, type RiskScoreResponse,
+  type RiskAssessmentResponse, type RebalancingResponse,
 } from '@/lib/api'
 import { ETFS } from '@/lib/etfs'
 
@@ -120,7 +121,11 @@ export default function AppShell() {
       .finally(() => setInvestorsLoading(false))
   }
 
-  useEffect(() => { refreshInvestors() }, [])
+  // Reload the investor list every time the manager moves to another screen.
+  // Loading it only once meant an investor added through Investor Intake could
+  // not be opened ("No investor selected") until the browser was refreshed,
+  // and a retaken questionnaire or edited profile showed the old details.
+  useEffect(() => { refreshInvestors() }, [activeView])
 
   const selectedInvestor = useMemo(
     () => investors.find(i => i.id === selectedInvestorId) ?? null,
@@ -476,23 +481,25 @@ function AUMByInvestorChart({ investors, onOpen }: { investors: Investor[]; onOp
 }
 
 function PortfolioPipelineChart({ statusCounts }: { statusCounts: Record<string, number> }) {
-  // Order statuses left→right by workflow stage; show every one that has >0.
+  // Order stages left→right by workflow; show every one that has >0.
+  // The keys are the investor stages that GET /overview counts in
+  // totals.stage_counts. (They used to be portfolio statuses, which that
+  // endpoint does not return, so this chart always came up empty.)
   const order: Array<{ key: string; label: string; color: string }> = [
-    { key: 'proposed',   label: 'Proposed',   color: '#EF9F27' },
-    { key: 'approved',   label: 'Approved',   color: '#97C459' },
-    { key: 'accepted',   label: 'Accepted',   color: '#5DCAA5' },
-    { key: 'rejected',   label: 'Rejected',   color: '#F09595' },
-    { key: 'declined',   label: 'Declined',   color: '#c08080' },
-    { key: 'superseded', label: 'Superseded', color: '#8497b5' },
+    { key: 'needs_questionnaire', label: 'Questionnaire pending', color: '#8497b5' },
+    { key: 'needs_optimization',  label: 'Awaiting optimizer',    color: '#a0b4c4' },
+    { key: 'awaiting_manager',    label: 'Awaiting manager',      color: '#EF9F27' },
+    { key: 'awaiting_client',     label: 'Awaiting client',       color: '#97C459' },
+    { key: 'invested',            label: 'Invested',              color: '#5DCAA5' },
   ]
   const present = order.filter(s => (statusCounts[s.key] ?? 0) > 0)
   const total = present.reduce((s, x) => s + (statusCounts[x.key] ?? 0), 0)
 
   return (
     <div style={chartPanel}>
-      <p style={chartTitle}>Portfolio pipeline <span style={chartSubtle}>· latest portfolio per investor</span></p>
+      <p style={chartTitle}>Client pipeline <span style={chartSubtle}>· stage of each investor</span></p>
       {total === 0 ? (
-        <p style={{ fontSize: 12, color: '#CBCBCB' }}>No portfolios yet.</p>
+        <p style={{ fontSize: 12, color: '#CBCBCB' }}>No investors yet.</p>
       ) : (
         <>
           <div style={{ display: 'flex', height: 14, borderRadius: 4, overflow: 'hidden', background: 'rgba(255,255,255,0.08)' }}>
@@ -557,7 +564,7 @@ function DashboardView({ investors, loading, onOpen }: { investors: Investor[]; 
       <h1 style={{ fontSize: 22, fontWeight: 500, color: '#FFFFE3', marginBottom: '1.5rem' }}>Dashboard</h1>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: '1.5rem' }}>
-        <StatCard label="Total clients" value={dashLoading ? '…' : String(totals.acceptedCount + (totals.pendingReview + (statusCounts.needs_questionnaire ?? 0) + (statusCounts.needs_optimization ?? 0) + (statusCounts.awaiting_client ?? 0)))} />
+        <StatCard label="Total clients" value={dashLoading ? '…' : String(investorOverviews.length)} /> 
         <StatCard label="Amount invested" value={dashLoading ? '…' : '₹' + Math.round(totals.totalInvested).toLocaleString('en-IN')} />
         <StatCard
           label={dashLoading ? 'Total gain · loading' : totals.hasValuationData ? `Gain on ${totals.acceptedCount} invested` : 'Total gain'}
@@ -734,6 +741,12 @@ function InvestorDetail({
 
   const initials = investor.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
 
+  // Fetch the overview again without blanking the page first. Used after an
+  // interaction is logged, so it shows up in the history straight away.
+  function reloadOverview() {
+    getInvestorOverview(investor.id).then(setOverview).catch(() => {})
+  }
+
   // Allocation + valuation come from the overview. Active portfolio is the
   // accepted one; pending portfolio is a newer proposal still waiting.
   const active = overview?.active_portfolio ?? null
@@ -820,7 +833,14 @@ function InvestorDetail({
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: '1.5rem' }}>
-        <StatCard label="AUM" value={investor.total_aum ? '₹' + investor.total_aum.toLocaleString('en-IN') : '—'} />
+        {/* Once a portfolio is accepted, AUM is the amount actually invested
+            (from the valuation), so it always agrees with Current value and Gain.
+            Before that it is the figure given at intake. */}
+        <StatCard
+          label={valuation ? 'AUM · invested' : 'AUM'}
+          value={valuation ? '₹' + Math.round(valuation.amount).toLocaleString('en-IN')
+            : investor.total_aum ? '₹' + investor.total_aum.toLocaleString('en-IN') : '—'}
+        />
         <StatCard
           label={valuation ? 'Current value' : overviewLoading ? 'Current value' : 'Current value · needs accepted portfolio'}
           value={valuation ? '₹' + Math.round(valuation.current_value).toLocaleString('en-IN') : '—'}
@@ -844,6 +864,7 @@ function InvestorDetail({
       {overview?.valuation_note && (
         <p style={{ fontSize: 12, color: '#EF9F27', marginBottom: '1rem' }}>{overview.valuation_note}</p>
       )}
+      {overview && <AssessmentPanel assessment={overview.assessment} />}
 
       {pending && (
         <div style={{
@@ -868,6 +889,10 @@ function InvestorDetail({
         <HoldingDriftPanel valuation={valuation} />
       </div>
 
+      {/* key: a different portfolio gets a fresh panel, so old trades never linger */}
+      {active && valuation && <RebalancingPanel key={active.id} portfolioId={active.id} />}
+      
+
       <InteractionList interactions={interactions.map(i => ({
         id: i.id,
         interaction_type: i.interaction_type ?? undefined,
@@ -877,7 +902,7 @@ function InvestorDetail({
       }))} />
 
       <div style={{ marginTop: '1.5rem' }}>
-        <LogInteractionForm investorId={investor.id} />
+        <LogInteractionForm investorId={investor.id} onLogged={reloadOverview} />
       </div>
 
       <div style={{ marginTop: '1.5rem' }}>
@@ -930,6 +955,123 @@ function HoldingDriftPanel({ valuation }: { valuation: ValuationResponse | null 
             )
           })}
         </div>
+      )}
+    </div>
+  )
+}
+
+// The scores behind the bucket (PRD 5.2): capacity, tolerance, the governing
+// score, which of the two limited it, the equity band it sets, and any review
+// notes the backend attached. All of it comes from the stored assessment.
+function AssessmentPanel({ assessment }: { assessment: RiskAssessmentResponse | null }) {
+  const panelStyle = {
+    background: 'rgba(255,255,227,0.06)',
+    border: '0.5px solid rgba(203,203,203,0.15)',
+    borderRadius: 12, padding: '1.25rem', marginBottom: '1.5rem',
+  } as const
+  const title = { fontSize: 12, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 } as const
+
+  if (!assessment) {
+    return (
+      <div style={panelStyle}>
+        <p style={title}>Risk assessment</p>
+        <p style={{ fontSize: 12, color: '#CBCBCB' }}>
+          No questionnaire on record. Use &quot;Take questionnaire&quot; above; the optimizer cannot run without one.
+        </p>
+      </div>
+    )
+  }
+
+  const items: Array<[string, string]> = [
+    ['Risk capacity', String(assessment.capacity_score)],
+    ['Risk tolerance', String(assessment.tolerance_score)],
+    ['Governing score', String(assessment.score)],
+    ['Limited by', assessment.limited_by],
+    ['Bucket', assessment.bucket],
+    ['Equity band', toPercent(assessment.min_equity).toFixed(1) + '% to ' + toPercent(assessment.max_equity).toFixed(1) + '%'],
+  ]
+  return (
+    <div style={panelStyle}>
+      <p style={title}>
+        Risk assessment <span style={{ color: '#6D8196', fontSize: 10 }}>· taken {localDate(assessment.created_at)}</span>
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
+        {items.map(([label, value]) => (
+          <div key={label}>
+            <p style={{ fontSize: 10, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>{label}</p>
+            <p style={{ fontSize: 15, color: '#FFFFE3', fontFamily: 'monospace', textTransform: 'capitalize' }}>{value}</p>
+          </div>
+        ))}
+      </div>
+      {assessment.notes.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <p style={{ fontSize: 10, color: '#EF9F27', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>Review notes</p>
+          {assessment.notes.map((note, i) => (
+            <p key={i} style={{ fontSize: 12, color: '#FFFFE3', lineHeight: 1.6 }}>• {note}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// The buys and sells that would bring each holding back to its approved
+// weight (PRD 5.8), from GET /portfolios/{id}/rebalancing. A paper list only:
+// the system places no trades.
+function RebalancingPanel({ portfolioId }: { portfolioId: string }) {
+  const [plan, setPlan] = useState<RebalancingResponse | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    getRebalancing(portfolioId)
+      .then(p => { if (!cancelled) setPlan(p) })
+      .catch(e => { if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the rebalancing trades.') })
+    return () => { cancelled = true }
+  }, [portfolioId])
+
+  return (
+    <div style={{
+      background: 'rgba(255,255,227,0.06)',
+      border: '0.5px solid rgba(203,203,203,0.15)',
+      borderRadius: 12, padding: '1.25rem', marginBottom: '1.5rem',
+    }}>
+      <p style={{ fontSize: 12, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+        Rebalancing {plan && <span style={{ color: '#6D8196', fontSize: 10 }}>· as of {plan.as_of_date}</span>}
+      </p>
+      {error && <p style={{ fontSize: 12, color: '#F09595' }}>{error}</p>}
+      {!plan && !error && <p style={{ fontSize: 12, color: '#CBCBCB' }}>Loading…</p>}
+      {plan && (
+        <>
+          <p style={{ fontSize: 12, color: plan.rebalancing_suggested ? '#EF9F27' : '#CBCBCB', marginBottom: 10 }}>
+            {plan.rebalancing_suggested
+              ? `Rebalancing is suggested: a holding has drifted more than ${toPercent(plan.drift_threshold).toFixed(0)} points from its approved weight.`
+              : `No holding has drifted more than ${toPercent(plan.drift_threshold).toFixed(0)} points, so no rebalancing is needed yet. These trades would restore the approved weights exactly.`}
+          </p>
+          {plan.trades.length === 0 ? (
+            <p style={{ fontSize: 12, color: '#CBCBCB' }}>Every holding is at its approved weight.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {plan.trades.map(t => (
+                <div key={t.ticker} style={{
+                  display: 'grid', gridTemplateColumns: '70px 1.2fr 1fr 1.4fr',
+                  gap: 8, alignItems: 'center',
+                  padding: '4px 0', borderBottom: '0.5px solid rgba(203,203,203,0.08)',
+                  fontSize: 12,
+                }}>
+                  <span style={{ textTransform: 'uppercase', fontWeight: 600, color: t.action === 'buy' ? '#97C459' : '#F09595' }}>{t.action}</span>
+                  <span style={{ fontFamily: 'monospace', color: '#a0b4c4' }}>{t.ticker}</span>
+                  <span style={{ fontFamily: 'monospace', color: '#FFFFE3', textAlign: 'right' }}>
+                    ₹{Math.round(t.amount).toLocaleString('en-IN')}
+                  </span>
+                  <span style={{ fontFamily: 'monospace', color: '#CBCBCB', textAlign: 'right' }}>
+                    {toPercent(t.current_weight).toFixed(1)}% → {toPercent(t.target_weight).toFixed(1)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
