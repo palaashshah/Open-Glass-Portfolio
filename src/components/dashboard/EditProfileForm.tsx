@@ -1,6 +1,6 @@
 'use client'
 import { useState } from "react"
-import { updateInvestor } from '@/lib/api'
+import { updateInvestor, ApiError } from '@/lib/api'
 
 type EditProfileFormProps = {
   investorId: string
@@ -12,32 +12,35 @@ type EditProfileFormProps = {
   }
 }
 
-// fixed valid options — dropdowns, not free text
-const HORIZONS = ['short', 'medium', 'long', 'very_long']
-const RISK_PROFILES = ['guardian', 'defender', 'moderator', 'builder', 'explorer']
+// risk_score and investment_horizon are owned by the backend's risk scorer.
+// Showing them as editable here would let the manager silently overwrite the
+// bucket the optimizer actually used — the result would be a screen that
+// disagrees with the portfolio. This form only edits name + AUM; the other
+// two are read-only labels. To change them, re-run the questionnaire.
 
 export default function EditProfileForm({ investorId, investor }: EditProfileFormProps) {
-
-  // pre-filled with current investor data from props
   const [name, setName] = useState(investor.name)
   const [totalaum, setTotalAum] = useState(investor.total_aum ?? 0)
-  const [horizon, setHorizon] = useState(investor.investment_horizon ?? '')
-  const [riskscore, setRiskScore] = useState(investor.risk_score ?? '')
   const [isLoading, setIsLoading] = useState(false)
-  const [saved, setSaved] = useState(false) // shows a "Saved!" confirmation briefly
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState('')
 
   async function handleSubmit() {
-    if (!name) return // don't submit if name is empty
+    if (!name) return
     setIsLoading(true)
-    await updateInvestor(investorId, {
-      name,
-      total_aum: Number(totalaum),
-      investment_horizon: horizon,
-      risk_score: riskscore,
-    })
-    setIsLoading(false)
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000) // hide "Saved!" after 2 seconds
+    setError('')
+    try {
+      await updateInvestor(investorId, {
+        name,
+        total_aum: Number(totalaum),
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Could not save profile changes.')
+    } finally {
+      setIsLoading(false)
+    }
   }
 
   return (
@@ -48,12 +51,10 @@ export default function EditProfileForm({ investorId, investor }: EditProfileFor
       padding: '1.25rem',
       marginBottom: '1.5rem',
     }}>
-      {/* section label */}
       <p style={{ fontSize: '12px', color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '1rem' }}>
         Edit Profile
       </p>
 
-      {/* name field */}
       <div style={{ marginBottom: '1rem' }}>
         <label style={{ fontSize: '12px', color: '#CBCBCB', display: 'block', marginBottom: '6px' }}>Name</label>
         <input
@@ -69,11 +70,11 @@ export default function EditProfileForm({ investorId, investor }: EditProfileFor
         />
       </div>
 
-      {/* AUM field */}
       <div style={{ marginBottom: '1rem' }}>
         <label style={{ fontSize: '12px', color: '#CBCBCB', display: 'block', marginBottom: '6px' }}>Assets Under Management (₹)</label>
         <input
           type="number"
+          min={0}
           value={totalaum}
           onChange={e => setTotalAum(Number(e.target.value))}
           style={{
@@ -86,50 +87,21 @@ export default function EditProfileForm({ investorId, investor }: EditProfileFor
         />
       </div>
 
-      {/* horizon dropdown */}
-      <div style={{ marginBottom: '1rem' }}>
-        <label style={{ fontSize: '12px', color: '#CBCBCB', display: 'block', marginBottom: '6px' }}>Investment Horizon</label>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          {HORIZONS.map(h => (
-            <button
-              key={h}
-              onClick={() => setHorizon(h)}
-              style={{
-                padding: '6px 14px', borderRadius: '20px', border: '0.5px solid rgba(203,203,203,0.25)',
-                fontSize: '12px', fontWeight: 500, cursor: 'pointer', textTransform: 'capitalize',
-                // highlight selected
-                background: horizon === h ? '#6D8196' : 'rgba(109,129,150,0.15)',
-                color: horizon === h ? '#FFFFE3' : '#CBCBCB',
-              }}
-            >
-              {h.replace('_', ' ')} {/* very_long → very long */}
-            </button>
-          ))}
-        </div>
+      {/* Read-only backend-computed fields. These change only when a new
+          risk assessment is scored, so letting the manager edit them here
+          would silently override the bucket the optimizer actually used. */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: '1.25rem' }}>
+        <ReadOnlyField label="Investment Horizon" value={investor.investment_horizon} />
+        <ReadOnlyField label="Risk Profile" value={investor.risk_score} />
       </div>
+      <p style={{ fontSize: 11, color: '#6D8196', marginBottom: '1rem' }}>
+        Horizon and risk profile come from the latest risk assessment. To change them, re-run the questionnaire from Investor Intake.
+      </p>
 
-      {/* risk score dropdown */}
-      <div style={{ marginBottom: '1.25rem' }}>
-        <label style={{ fontSize: '12px', color: '#CBCBCB', display: 'block', marginBottom: '6px' }}>Risk Profile</label>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          {RISK_PROFILES.map(r => (
-            <button
-              key={r}
-              onClick={() => setRiskScore(r)}
-              style={{
-                padding: '6px 14px', borderRadius: '20px', border: '0.5px solid rgba(203,203,203,0.25)',
-                fontSize: '12px', fontWeight: 500, cursor: 'pointer', textTransform: 'capitalize',
-                background: riskscore === r ? '#6D8196' : 'rgba(109,129,150,0.15)',
-                color: riskscore === r ? '#FFFFE3' : '#CBCBCB',
-              }}
-            >
-              {r}
-            </button>
-          ))}
-        </div>
-      </div>
+      {error && (
+        <p style={{ fontSize: 12, color: '#F09595', marginBottom: 10 }}>{error}</p>
+      )}
 
-      {/* save button */}
       <button
         onClick={handleSubmit}
         disabled={isLoading || !name}
@@ -144,6 +116,22 @@ export default function EditProfileForm({ investorId, investor }: EditProfileFor
       >
         {saved ? 'Saved ✓' : isLoading ? 'Saving...' : 'Save changes'}
       </button>
+    </div>
+  )
+}
+
+function ReadOnlyField({ label, value }: { label: string; value?: string }) {
+  return (
+    <div>
+      <p style={{ fontSize: 12, color: '#CBCBCB', marginBottom: 6 }}>{label}</p>
+      <p style={{
+        fontSize: 13, color: '#FFFFE3', textTransform: 'capitalize' as const,
+        padding: '8px 12px', borderRadius: 8,
+        background: 'rgba(255,255,255,0.03)',
+        border: '0.5px dashed rgba(203,203,203,0.2)',
+      }}>
+        {value ? value.replace(/_/g, ' ') : '—'}
+      </p>
     </div>
   )
 }

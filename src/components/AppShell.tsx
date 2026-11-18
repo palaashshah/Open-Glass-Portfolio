@@ -64,25 +64,36 @@ type ViewKey =
 type NavItem = { key: ViewKey; label: string }
 type NavGroup = { title: string; items: NavItem[] }
 
+// Sidebar groups follow the manager's workflow left-to-right in time:
+// Overview → Clients (who) → Portfolio (proposal pipeline, in stage order)
+// → Monitoring (after the client has signed off).
 const NAV: NavGroup[] = [
-  { title: 'Overview', items: [{ key: 'dashboard', label: 'Dashboard' }] },
   {
-    title: 'Client',
+    title: 'Overview',
+    items: [{ key: 'dashboard', label: 'Dashboard' }],
+  },
+  {
+    title: 'Clients',
     items: [
       { key: 'onboarding', label: 'Investor Intake' },
-      { key: 'portal', label: 'Investor Portal' },
+      { key: 'investors', label: 'Investors' },
+      { key: 'interactions', label: 'Interactions' },
     ],
   },
   {
-    title: 'Manager',
+    title: 'Portfolio',
     items: [
       { key: 'submissions', label: 'Submission Queue' },
-      { key: 'investors', label: 'Investors' },
       { key: 'review', label: 'Review & Customize' },
       { key: 'rationale', label: 'Rationale' },
       { key: 'proposal', label: 'Proposal (PDF)' },
       { key: 'sign-off', label: 'Client Sign-Off' },
-      { key: 'interactions', label: 'Interactions' },
+    ],
+  },
+  {
+    title: 'Monitoring',
+    items: [
+      { key: 'portal', label: 'Investor Portal' },
       { key: 'drift', label: 'Drift Alerts' },
       { key: 'audit', label: 'Audit Log' },
     ],
@@ -141,6 +152,17 @@ export default function AppShell() {
             Portfolio Management
           </p>
         </div>
+
+        {/* Selected-client indicator. Many right-pane views read from this
+            selection (Review & Customize, Rationale, Proposal, Sign-Off,
+            Investor Portal) — surfacing it in the sidebar makes it obvious
+            which investor those screens are actually acting on. */}
+        <SelectedClientCard
+          investor={selectedInvestor}
+          onOpen={() => selectedInvestor && openInvestor(selectedInvestor.id)}
+          onClear={() => setSelectedInvestorId(null)}
+          onPickInvestors={() => setActiveView('investors')}
+        />
 
         {NAV.map(group => (
           <div key={group.title}>
@@ -236,6 +258,98 @@ export default function AppShell() {
         {activeView === 'drift' && <DriftAlerts onOpen={openInvestor} />}
         {activeView === 'audit' && <AuditLog investors={investors} />}
       </main>
+    </div>
+  )
+}
+
+// ── Selected client sidebar card ─────────────────────────────────────────────
+
+function SelectedClientCard({
+  investor,
+  onOpen,
+  onClear,
+  onPickInvestors,
+}: {
+  investor: Investor | null
+  onOpen: () => void
+  onClear: () => void
+  onPickInvestors: () => void
+}) {
+  if (!investor) {
+    return (
+      <div style={{
+        border: '0.5px dashed rgba(203,203,203,0.25)',
+        borderRadius: 8, padding: '10px 12px',
+        background: 'transparent',
+      }}>
+        <p style={{
+          fontSize: 10, color: '#6D8196', textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 4,
+        }}>Selected client</p>
+        <p style={{ fontSize: 12, color: '#CBCBCB', lineHeight: 1.4, marginBottom: 6 }}>
+          Nothing selected.
+        </p>
+        <button
+          onClick={onPickInvestors}
+          style={{
+            background: 'transparent', border: 'none',
+            color: '#a0b4c4', fontSize: 11, padding: 0,
+            cursor: 'pointer', textDecoration: 'underline',
+          }}
+        >Pick one →</button>
+      </div>
+    )
+  }
+
+  const initials = investor.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()
+
+  return (
+    <div style={{
+      border: '0.5px solid rgba(109,129,150,0.4)',
+      background: 'rgba(109,129,150,0.12)',
+      borderRadius: 8, padding: '10px 12px',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+        <p style={{
+          fontSize: 10, color: '#a0b4c4', textTransform: 'uppercase', letterSpacing: '0.12em',
+        }}>Selected client</p>
+        <button
+          onClick={onClear}
+          title="Clear selection"
+          style={{
+            background: 'transparent', border: 'none',
+            color: '#6D8196', fontSize: 14, lineHeight: 1,
+            padding: 0, cursor: 'pointer',
+          }}
+        >×</button>
+      </div>
+
+      <button
+        onClick={onOpen}
+        style={{
+          display: 'flex', gap: 8, alignItems: 'center', width: '100%',
+          background: 'transparent', border: 'none', padding: 0,
+          cursor: 'pointer', textAlign: 'left',
+        }}
+      >
+        <div style={{
+          width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
+          background: 'rgba(109,129,150,0.3)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 11, color: '#FFFFE3',
+        }}>{initials}</div>
+        <div style={{ minWidth: 0 }}>
+          <p style={{
+            fontSize: 13, color: '#FFFFE3', fontWeight: 500,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{investor.name}</p>
+          <p style={{
+            fontSize: 10, color: '#CBCBCB', textTransform: 'capitalize',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {investor.risk_score ?? '—'} · {investor.investment_horizon ?? '—'}
+          </p>
+        </div>
+      </button>
     </div>
   )
 }
@@ -584,8 +698,16 @@ function InvestorDetail({
   const [deleteError, setDeleteError] = useState('')
 
   async function handleDelete() {
+    // The backend refuses (409) if any portfolios, assessments, interactions
+    // or audit rows exist for this investor — so the UI can't truthfully
+    // promise a cascade. The prompt reflects that: it's only usable for
+    // investors that have no history yet.
     const typed = window.prompt(
-      `Delete investor "${investor.name}"?\n\nThis also removes their portfolios, assessments, interactions and audit history. Type DELETE to confirm.`
+      `Delete investor "${investor.name}"?\n\n` +
+      `The backend only allows deletion if the investor has no portfolios, ` +
+      `assessments, interactions or audit entries attached. If anything is attached ` +
+      `the delete will be refused with a 409 and you'll see the error here.\n\n` +
+      `Type DELETE to confirm.`
     )
     if (typed !== 'DELETE') return
     setDeleting(true)

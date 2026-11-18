@@ -1,6 +1,6 @@
 'use client'
 import { useState } from "react"
-import { createInteraction } from '@/lib/api'
+import { createInteraction, ApiError } from '@/lib/api'
 
 type LogInteractionFormProps = {
   investorId: string
@@ -10,19 +10,26 @@ export default function LogInteractionForm({ investorId }: LogInteractionFormPro
     const [interactiontype, setInteractiontype] = useState('')
     const [notes, setNotes] = useState('')
     const [isLoading, setIsLoading] = useState(false)
+    const [error, setError] = useState('')
 
     async function handleSubmit() {
-        if (!interactiontype || !notes) return  // don't submit if fields are empty
+        if (!interactiontype || !notes) return
         setIsLoading(true)
-        await createInteraction({
-            investor_id: investorId,
-            interaction_type: interactiontype,
-            notes,
-            manager_id: 'manager-001',
-        })
-        setIsLoading(false)
-        setInteractiontype('')
-        setNotes('')
+        setError('')
+        try {
+            await createInteraction({
+                investor_id: investorId,
+                interaction_type: interactiontype,
+                notes,
+                manager_id: 'manager-001',
+            })
+            setInteractiontype('')
+            setNotes('')
+        } catch (e) {
+            setError(e instanceof ApiError ? e.message : 'Could not log the interaction.')
+        } finally {
+            setIsLoading(false)
+        }
     }
 
     return (
@@ -83,7 +90,10 @@ export default function LogInteractionForm({ investorId }: LogInteractionFormPro
                 }}
             />
 
-            {/* submit button */}
+            {error && (
+                <p style={{ fontSize: 12, color: '#F09595', marginBottom: 10 }}>{error}</p>
+            )}
+
             <button
                 onClick={handleSubmit}
                 disabled={isLoading || !interactiontype || !notes}

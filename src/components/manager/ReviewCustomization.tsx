@@ -36,6 +36,8 @@ export default function ReviewCustomization({
 
   const [savingAdjust, setSavingAdjust] = useState(false)
   const [adjustError, setAdjustError] = useState('')
+  const [adjustViolations, setAdjustViolations] = useState<string[]>([])
+  const [adjustReason, setAdjustReason] = useState('')
   const [deciding, setDeciding] = useState(false)
   const [decisionError, setDecisionError] = useState('')
   const [rejectReason, setRejectReason] = useState('')
@@ -71,8 +73,23 @@ export default function ReviewCustomization({
     setMetrics(null)
     setMetricsError('')
     setAdjustError('')
+    setAdjustViolations([])
+    setAdjustReason('')
     setDecisionError('')
   }
+
+  // Dirty detector: true when the on-screen weights differ from what the
+  // backend has stored on the portfolio. Prevents Approve from applying
+  // to stale saved weights while the sliders show something else.
+  const dirty = useMemo(() => {
+    if (!portfolio) return false
+    for (const t of ETFS.map(e => e.ticker)) {
+      const onScreen = Math.round((weights[t] ?? 0) * 100)
+      const saved = Math.round(toPercent(portfolio.weights[t] ?? 0) * 100)
+      if (onScreen !== saved) return true
+    }
+    return false
+  }, [weights, portfolio])
 
   // Re-run /optimize/metrics whenever weights change (debounced 400ms).
   const runMetrics = useCallback(async (w: Record<string, number>) => {
@@ -119,20 +136,38 @@ export default function ReviewCustomization({
 
   async function saveAdjust() {
     if (!portfolio) return
+    if (!adjustReason.trim()) {
+      setAdjustError('Please provide a reason for this adjustment.')
+      return
+    }
     setSavingAdjust(true)
     setAdjustError('')
+    setAdjustViolations([])
     try {
       const body = {
         weights: Object.fromEntries(
           Object.entries(weights).map(([k, v]) => [k, fromPercent(v)])
         ),
         adjusted_by: 'manager-001',
-        reason: 'Manager-adjusted weights before approval',
+        reason: adjustReason.trim(),
       }
       const p = await adjustPortfolio(portfolio.id, body)
       hydrate(p)
     } catch (e) {
-      setAdjustError(formatError(e, 'save adjustment'))
+      // Backend rejects out-of-policy weights with 422 and a structured
+      // detail: { message, violations: [...] }. Surface the violations
+      // instead of a bare "HTTP 422".
+      if (e instanceof ApiError && e.detail && typeof e.detail === 'object') {
+        const d = e.detail as { message?: string; violations?: string[] }
+        if (Array.isArray(d.violations) && d.violations.length > 0) {
+          setAdjustError(d.message ?? 'Adjustment was refused by the backend.')
+          setAdjustViolations(d.violations)
+        } else {
+          setAdjustError(formatError(e, 'save adjustment'))
+        }
+      } else {
+        setAdjustError(formatError(e, 'save adjustment'))
+      }
     } finally {
       setSavingAdjust(false)
     }
@@ -166,7 +201,11 @@ export default function ReviewCustomization({
     [weights]
   )
   const violations = metrics?.violations ?? []
-  const canApprove = !!portfolio && violations.length === 0 && Math.round(total) === 100 && portfolio.status === 'proposed'
+  // Approve must only act on the weights actually persisted on the portfolio.
+  // If the sliders have moved since the last save (`dirty`), force a Save
+  // Adjusted Weights first — otherwise an approval would silently apply to
+  // stale weights instead of what the manager sees on screen.
+  const canApprove = !!portfolio && !dirty && violations.length === 0 && Math.round(total) === 100 && portfolio.status === 'proposed'
 
   if (!investorId) {
     return <Empty>Select an investor to review their portfolio.</Empty>
@@ -248,17 +287,48 @@ export default function ReviewCustomization({
             })}
           </div>
 
+          {!decided && (
+            <div style={{ marginTop: 14 }}>
+              <label style={{ fontSize: 11, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 6 }}>
+                Reason for adjustment
+              </label>
+              <input
+                type="text"
+                value={adjustReason}
+                onChange={e => setAdjustReason(e.target.value)}
+                placeholder="Required when saving — the backend records this on the audit trail"
+                disabled={savingAdjust}
+                style={{
+                  width: '100%', padding: '8px 10px', borderRadius: 6,
+                  background: 'rgba(255,255,255,0.06)', color: '#FFFFE3',
+                  border: '1px solid rgba(203,203,203,0.2)', fontSize: 13,
+                  outline: 'none', boxSizing: 'border-box',
+                }}
+              />
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
             <button onClick={normalize} disabled={decided} style={btnGhost}>Normalize to 100</button>
             <button
               onClick={saveAdjust}
-              disabled={decided || savingAdjust || Math.round(total) !== 100}
+              disabled={decided || savingAdjust || Math.round(total) !== 100 || !adjustReason.trim()}
               style={btnPrimary(savingAdjust)}
             >
               {savingAdjust ? 'Saving…' : 'Save adjusted weights'}
             </button>
           </div>
           {adjustError && <p style={errText}>{adjustError}</p>}
+          {adjustViolations.length > 0 && (
+            <ul style={{ marginTop: 8, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {adjustViolations.map((v, i) => (
+                <li key={i} style={{ fontSize: 12, color: '#FFFFE3', paddingLeft: 12, position: 'relative' }}>
+                  <span style={{ position: 'absolute', left: 0, color: '#F09595' }}>•</span>
+                  {v}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {/* ── right: metrics, violations, decision ── */}
@@ -346,7 +416,12 @@ export default function ReviewCustomization({
                   </button>
                 </div>
                 {decisionError && <p style={errText}>{decisionError}</p>}
-                {!canApprove && !violations.length && Math.round(total) !== 100 && (
+                {dirty && (
+                  <p style={{ fontSize: 11, color: '#EF9F27', marginTop: 8 }}>
+                    You have unsaved slider changes — save them with a reason before approving, or the approval would apply to the previously-stored weights.
+                  </p>
+                )}
+                {!dirty && !violations.length && Math.round(total) !== 100 && (
                   <p style={{ fontSize: 11, color: '#6D8196', marginTop: 8 }}>
                     Weights must sum to 100% before approval (currently {total.toFixed(1)}%).
                   </p>

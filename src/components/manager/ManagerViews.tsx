@@ -26,49 +26,105 @@ type SubmissionQueueProps = {
   onRunOptimization: (id: string) => void
 }
 
+type QueueStatus = 'no-portfolio' | 'proposed'
+
 export function SubmissionQueue({ investors, onOpen, onRunOptimization }: SubmissionQueueProps) {
-  const pending = investors.slice(0, 6)
+  const [rows, setRows] = useState<Array<Investor & { queueStatus: QueueStatus; portfolioId?: string }> | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (investors.length === 0) { setRows([]); return }
+    let cancelled = false
+    ;(async () => {
+      try {
+        // Per PRD 5.2: the queue is investors needing manager action — either
+        // they have no portfolio yet (awaiting optimization) or their latest
+        // portfolio is still "proposed" (awaiting decision). Everything else
+        // (approved / accepted / rejected / declined / superseded) is not
+        // actionable in this screen.
+        const lists = await Promise.all(
+          investors.map(inv => listPortfolios(inv.id).catch(() => [] as PortfolioResponse[]))
+        )
+        if (cancelled) return
+        const next: Array<Investor & { queueStatus: QueueStatus; portfolioId?: string }> = []
+        investors.forEach((inv, i) => {
+          const sorted = [...lists[i]].sort((a, b) => b.created_at.localeCompare(a.created_at))
+          const latest = sorted[0]
+          if (!latest) {
+            next.push({ ...inv, queueStatus: 'no-portfolio' })
+          } else if (latest.status === 'proposed') {
+            next.push({ ...inv, queueStatus: 'proposed', portfolioId: latest.id })
+          }
+        })
+        setRows(next)
+      } catch (e) {
+        if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the submission queue.')
+      }
+    })()
+    return () => { cancelled = true }
+  }, [investors])
 
   return (
-    <div style={{ padding: '2rem', maxWidth: 1000 }}>
+    <div style={{ padding: '2rem', maxWidth: 1100 }}>
       <h1 style={h1}>Submission Queue</h1>
       <p style={muted}>
-        Investors in the system — select one to open their portfolios or run a fresh optimizer pass.
+        Investors that need the manager&apos;s attention — awaiting the first optimizer run, or sitting on a proposed portfolio.
       </p>
+
+      {error && <ErrorView title="Submission queue" error={error} />}
 
       <div style={{ ...panel, padding: 0, marginTop: '1rem' }}>
         <div style={{
-          display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto',
+          display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto',
           padding: '10px 16px', gap: 12,
           borderBottom: '0.5px solid rgba(203,203,203,0.15)',
           fontSize: 11, color: '#CBCBCB', textTransform: 'uppercase', letterSpacing: '0.08em',
         }}>
-          <span>Investor</span><span>Risk</span><span>Horizon</span><span>AUM</span><span />
+          <span>Investor</span><span>Status</span><span>Risk</span><span>Horizon</span><span>AUM</span><span />
         </div>
 
-        {pending.length === 0 && (
-          <p style={{ padding: '1.5rem', fontSize: 13, color: '#CBCBCB' }}>No submissions in the queue.</p>
+        {rows === null && !error && (
+          <p style={{ padding: '1.5rem', fontSize: 13, color: '#CBCBCB' }}>Loading…</p>
+        )}
+        {rows && rows.length === 0 && (
+          <p style={{ padding: '1.5rem', fontSize: 13, color: '#CBCBCB' }}>Nothing pending — every investor already has a decided portfolio.</p>
         )}
 
-        {pending.map(inv => (
+        {rows?.map(inv => (
           <div key={inv.id} style={{
-            display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto',
+            display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto',
             padding: '12px 16px', gap: 12, alignItems: 'center',
             borderBottom: '0.5px solid rgba(203,203,203,0.08)',
             fontSize: 13, color: '#FFFFE3',
           }}>
             <span onClick={() => onOpen(inv.id)} style={{ cursor: 'pointer' }}>{inv.name}</span>
+            <QueueStatusChip status={inv.queueStatus} />
             <span style={{ color: '#a0b4c4', textTransform: 'capitalize' }}>{inv.risk_score ?? '—'}</span>
             <span style={{ color: '#CBCBCB', textTransform: 'capitalize' }}>{inv.investment_horizon ?? '—'}</span>
             <span style={mono}>{inv.total_aum ? '₹' + inv.total_aum.toLocaleString('en-IN') : '—'}</span>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => onOpen(inv.id)} style={btnGhost}>Open</button>
-              <button onClick={() => onRunOptimization(inv.id)} style={btnPrimary}>Run optimization</button>
+              <button onClick={() => onRunOptimization(inv.id)} style={btnPrimary}>
+                {inv.queueStatus === 'no-portfolio' ? 'Run optimization' : 'Review'}
+              </button>
             </div>
           </div>
         ))}
       </div>
     </div>
+  )
+}
+
+function QueueStatusChip({ status }: { status: QueueStatus }) {
+  const config = status === 'no-portfolio'
+    ? { label: 'Awaiting optimizer', color: '#a0b4c4' }
+    : { label: 'Proposed · awaiting decision', color: '#EF9F27' }
+  return (
+    <span style={{
+      fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em',
+      padding: '3px 8px', borderRadius: 4,
+      background: `${config.color}22`, color: config.color,
+    }}>{config.label}</span>
   )
 }
 
